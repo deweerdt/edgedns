@@ -88,7 +88,8 @@ impl UdpListener {
                 let client_query_fut = self.resolver_tx.clone().send(client_query);
                 future::ok((self, Some(client_query_fut)))
             })
-            .and_then(move |(this, _)| Ok(Loop::Continue(this)))
+            .and_then(move |(this, fut)| Ok(this))
+            .and_then(move |this| Ok(Loop::Continue(this)))
     }
 
     fn run(mut self) -> io::Result<()> {
