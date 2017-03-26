@@ -9,18 +9,20 @@ extern crate bpf;
 extern crate bytes;
 extern crate clap;
 extern crate coarsetime;
-#[cfg(feature = "nightly")]
 extern crate dnstap;
 extern crate env_logger;
-extern crate framestream;
+extern crate futures;
 extern crate jumphash;
-extern crate mio;
+extern crate net2;
 extern crate nix;
 extern crate privdrop;
 extern crate rand;
 extern crate siphasher;
 extern crate slab;
 extern crate socket_priority;
+extern crate tokio_core;
+extern crate tokio_io;
+extern crate tokio_timer;
 extern crate toml;
 
 #[cfg(feature = "webservice")]
@@ -52,11 +54,12 @@ use log_dnstap::LogDNSTap;
 use net_helpers::*;
 use privdrop::PrivDrop;
 use resolver::*;
-use std::net::{self, UdpSocket};
+use std::net;
 use std::sync::Arc;
 use std::sync::mpsc;
 use std::thread;
 use tcp_listener::*;
+use tokio_core::net::UdpSocket;
 use udp_listener::*;
 use varz::*;
 
@@ -88,7 +91,7 @@ const WEBSERVICE_THREADS: usize = 1;
 pub struct EdgeDNSContext {
     pub config: Config,
     pub listen_addr: String,
-    pub udp_socket: UdpSocket,
+    pub udp_socket: net::UdpSocket,
     pub tcp_socket: net::TcpListener,
     pub cache: Cache,
     pub varz: Arc<Varz>,
@@ -164,14 +167,6 @@ impl EdgeDNS {
                                                   service_ready_tx.clone())
                     .expect("Unable to spawn a UDP listener");
             tasks.push(udp_listener);
-            service_ready_rx.recv().unwrap();
-        }
-        for _ in 0..config.tcp_listener_threads {
-            let tcp_listener = TcpListener::spawn(&edgedns_context,
-                                                  resolver_tx.clone(),
-                                                  service_ready_tx.clone())
-                    .expect("Unable to spawn a TCP listener");
-            tasks.push(tcp_listener);
             service_ready_rx.recv().unwrap();
         }
         if config.webservice_enabled {
