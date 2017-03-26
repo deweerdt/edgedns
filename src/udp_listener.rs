@@ -4,7 +4,7 @@ use client_query::*;
 use coarsetime::Instant;
 use dns;
 use futures::Future;
-use futures::future::{Loop, loop_fn, FutureResult};
+use futures::future::{self, Loop, loop_fn, FutureResult};
 use futures::sync::mpsc::{channel, Sender, Receiver};
 use futures::Sink;
 use std::io;
@@ -42,7 +42,7 @@ impl UdpListener {
                 if count < DNS_QUERY_MIN_SIZE || count > DNS_QUERY_MAX_SIZE {
                     info!("Short query using UDP");
                     self.varz.client_queries_errors.inc();
-                    return Ok(Loop::Continue(self));
+                    return future::ok(self);
                 }
                 let normalized_question =
                     match dns::normalize(&self.packet_buf.as_ref().unwrap()[..count], true) {
@@ -50,7 +50,7 @@ impl UdpListener {
                         Err(e) => {
                             debug!("Error while parsing the question: {}", e);
                             self.varz.client_queries_errors.inc();
-                            return Ok(Loop::Continue(self));
+                            return future::ok(self);
                         }
                     };
                 let cache_entry = self.cache.get2(&normalized_question);
@@ -64,7 +64,7 @@ impl UdpListener {
                                 .as_ref()
                                 .unwrap()
                                 .send_to(&packet, &client_addr);
-                            return Ok(Loop::Continue(self));
+                            return future::ok(self);
                         }
                         debug!("cached");
                         dns::set_tid(&mut cache_entry.packet, normalized_question.tid);
@@ -73,7 +73,7 @@ impl UdpListener {
                             .as_ref()
                             .unwrap()
                             .send_to(&cache_entry.packet, &client_addr);
-                        return Ok(Loop::Continue(self));
+                        return future::ok(self);
                     }
                     debug!("expired");
                     self.varz.client_queries_expired.inc();
@@ -85,9 +85,9 @@ impl UdpListener {
                     normalized_question: normalized_question,
                     ts: Instant::recent(),
                 };
-                //self.resolver_tx.send(client_query).and_then(|resolver_tx| Ok(Loop::Continue(self)))
-                Ok(Loop::Continue(self))
+                future::ok(self)
             })
+            .and_then(move |x| Ok(Loop::Continue(x)))
     }
 
     fn run(mut self) -> io::Result<()> {
