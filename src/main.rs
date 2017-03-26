@@ -1,6 +1,8 @@
 #![cfg_attr(feature="clippy", feature(plugin))]
 #![cfg_attr(feature="clippy", plugin(clippy))]
 
+#![feature(conservative_impl_trait)]
+
 #[macro_use]
 extern crate log;
 extern crate clockpro_cache;

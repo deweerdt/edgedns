@@ -4,7 +4,7 @@ use client_query::*;
 use coarsetime::Instant;
 use dns;
 use futures::Future;
-use futures::future::{Loop, loop_fn};
+use futures::future::{Loop, loop_fn, FutureResult};
 use futures::sync::mpsc::{channel, Sender, Receiver};
 use futures::Sink;
 use std::io;
@@ -33,6 +33,22 @@ struct UdpClientSession {
     socket: Option<UdpSocket>,
 }
 
+impl UdpClientSession {
+    fn process(mut self) -> impl Future<Item = Loop<Self, Self>, Error = io::Error> {
+        self.socket
+            .take()
+            .unwrap()
+            .recv_dgram(self.packet.take().unwrap())
+            .map(move |(socket, packet, len, addr)| (socket, packet))
+            .and_then(move |(socket, packet)| {
+                          println!("received");
+                          self.packet = Some(packet);
+                          self.socket = Some(socket);
+                          Ok(Loop::Continue(self))
+                      })
+    }
+}
+
 impl UdpListener {
     fn run(mut self) -> io::Result<()> {
         debug!("udp listener socket={:?}", self.socket);
@@ -42,27 +58,12 @@ impl UdpListener {
             packet: Some(packet),
             socket: Some(self.socket),
         };
-        let stream = loop_fn::<_, UdpClientSession, _, _>(session, move |mut session| {
-            println!("loop turn");
-            session.socket
-                .take()
-                .unwrap()
-                .recv_dgram(session.packet.take().unwrap())
-                .map(move |(socket, packet, len, addr)| (session, socket, packet))
-                .and_then(move |(mut session, socket, packet)| {
-                              println!("received");
-                              session.packet = Some(packet);
-                              session.socket = Some(socket);
-                              Ok(Loop::Continue(session))
-                          })
-        });
-
+        let stream = loop_fn(session, |session| session.process());
         self.event_loop.handle().spawn(stream.map_err(|_| {}).map(|_| {}));
         self.service_ready_tx.send(0).unwrap();
         loop {
             self.event_loop.turn(None)
         }
-        Ok(())
     }
 
     pub fn spawn(
