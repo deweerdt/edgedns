@@ -34,12 +34,19 @@ struct UdpClientSession {
 }
 
 impl UdpClientSession {
+    fn new(socket: UdpSocket) -> Self {
+        UdpClientSession {
+            packet: Some(vec![0u8; DNS_MAX_UDP_SIZE]),
+            socket: Some(socket),
+        }
+    }
+
     fn process(mut self) -> impl Future<Item = Loop<Self, Self>, Error = io::Error> {
         self.socket
             .take()
             .unwrap()
             .recv_dgram(self.packet.take().unwrap())
-            .map(move |(socket, packet, len, addr)| (socket, packet))
+            .map(move |(socket, packet, count, client_addr)| (socket, packet))
             .and_then(move |(socket, packet)| {
                           println!("received");
                           self.packet = Some(packet);
@@ -52,13 +59,8 @@ impl UdpClientSession {
 impl UdpListener {
     fn run(mut self) -> io::Result<()> {
         debug!("udp listener socket={:?}", self.socket);
-
-        let packet = vec![0u8; DNS_MAX_UDP_SIZE];
-        let session = UdpClientSession {
-            packet: Some(packet),
-            socket: Some(self.socket),
-        };
-        let stream = loop_fn(session, |session| session.process());
+        let stream = loop_fn(UdpClientSession::new(self.socket),
+                             |session| session.process());
         self.event_loop.handle().spawn(stream.map_err(|_| {}).map(|_| {}));
         self.service_ready_tx.send(0).unwrap();
         loop {
