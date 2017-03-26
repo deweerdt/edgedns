@@ -42,7 +42,7 @@ impl UdpListener {
                 if count < DNS_QUERY_MIN_SIZE || count > DNS_QUERY_MAX_SIZE {
                     info!("Short query using UDP");
                     self.varz.client_queries_errors.inc();
-                    return future::ok(self);
+                    return future::ok((self, None));
                 }
                 let normalized_question =
                     match dns::normalize(&self.packet_buf.as_ref().unwrap()[..count], true) {
@@ -50,7 +50,7 @@ impl UdpListener {
                         Err(e) => {
                             debug!("Error while parsing the question: {}", e);
                             self.varz.client_queries_errors.inc();
-                            return future::ok(self);
+                            return future::ok((self, None));
                         }
                     };
                 let cache_entry = self.cache.get2(&normalized_question);
@@ -64,7 +64,7 @@ impl UdpListener {
                                 .as_ref()
                                 .unwrap()
                                 .send_to(&packet, &client_addr);
-                            return future::ok(self);
+                            return future::ok((self, None));
                         }
                         debug!("cached");
                         dns::set_tid(&mut cache_entry.packet, normalized_question.tid);
@@ -73,7 +73,7 @@ impl UdpListener {
                             .as_ref()
                             .unwrap()
                             .send_to(&cache_entry.packet, &client_addr);
-                        return future::ok(self);
+                        return future::ok((self, None));
                     }
                     debug!("expired");
                     self.varz.client_queries_expired.inc();
@@ -85,9 +85,10 @@ impl UdpListener {
                     normalized_question: normalized_question,
                     ts: Instant::recent(),
                 };
-                future::ok(self)
+                let client_query_fut = self.resolver_tx.clone().send(client_query);
+                future::ok((self, Some(client_query_fut)))
             })
-            .and_then(move |x| Ok(Loop::Continue(x)))
+            .and_then(move |(this, _)| Ok(Loop::Continue(this)))
     }
 
     fn run(mut self) -> io::Result<()> {
