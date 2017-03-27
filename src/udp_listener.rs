@@ -29,7 +29,7 @@ pub struct UdpListener {
 }
 
 impl UdpListener {
-    fn process(mut self) -> Box<Future<Item = Loop<Self, Self>, Error = io::Error>> {
+    fn process(mut self) -> Box<Future<Item = Self, Error = io::Error>> {
         Box::new(self.socket
                      .take()
                      .unwrap()
@@ -91,15 +91,16 @@ impl UdpListener {
                 .map_err(|_| io::Error::last_os_error())
                 .map(|_| self);
             Box::new(client_query_fut) as Box<Future<Item = _, Error = _>>
-        })
-                     .and_then(move |this| Ok(Loop::Continue(this))))
+        }))
     }
 
     fn run(mut self) -> io::Result<()> {
         debug!("udp listener socket={:?}", self.socket);
         let mut event_loop = self.event_loop.take().unwrap();
         let service_ready_tx = self.service_ready_tx.take().unwrap();
-        let stream = loop_fn(self, |session| session.process());
+        let stream = loop_fn::<_, Self, _, _>(self, |session| {
+            session.process().and_then(|session| Ok(Loop::Continue(session)))
+        });
         event_loop.handle().spawn(stream.map_err(|_| {}).map(|_| {}));
         service_ready_tx.send(0).unwrap();
         loop {
