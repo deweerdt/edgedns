@@ -29,11 +29,10 @@ pub struct UdpListener {
 }
 
 impl UdpListener {
-    fn process<'a>(mut self) -> impl Future<Item = Self, Error = io::Error> + 'a {
-        let fut_raw_query = self.socket
-            .take()
-            .unwrap()
-            .recv_dgram(self.packet_buf.take().unwrap());
+    fn handle_query<'a>(
+        mut self,
+        fut_raw_query: RecvDgram<Vec<u8>>,
+    ) -> impl Future<Item = Self, Error = io::Error> + 'a {
         let fut_handle_query =
             fut_raw_query.and_then(move |(socket, packet_buf, count, client_addr)| {
                 println!("received");
@@ -94,6 +93,14 @@ impl UdpListener {
                 Box::new(fut_resolver_query) as Box<Future<Item = _, Error = _>>
             });
         fut_handle_query
+    }
+
+    fn process<'a>(mut self) -> impl Future<Item = Self, Error = io::Error> + 'a {
+        let fut_raw_query = self.socket
+            .take()
+            .unwrap()
+            .recv_dgram(self.packet_buf.take().unwrap());
+        self.handle_query(fut_raw_query)
     }
 
     fn run(mut self) -> io::Result<()> {
