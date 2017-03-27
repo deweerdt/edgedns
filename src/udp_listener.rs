@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::sync::mpsc;
 use std::thread;
 use super::EdgeDNSContext;
-use tokio_core::net::UdpSocket;
+use tokio_core::net::{UdpSocket, RecvDgram};
 use tokio_core::reactor::Core;
 use varz::Varz;
 
@@ -29,7 +29,7 @@ pub struct UdpListener {
 }
 
 impl UdpListener {
-    fn process(mut self) -> Box<Future<Item = Self, Error = io::Error>> {
+    fn process<'a>(mut self) -> impl Future<Item = Self, Error = io::Error> + 'a {
         let fut_raw_query = self.socket
             .take()
             .unwrap()
@@ -90,10 +90,10 @@ impl UdpListener {
                     .clone()
                     .send(client_query)
                     .map_err(|_| io::Error::last_os_error())
-                    .map(|_| self);
+                    .map(move |_| self);
                 Box::new(fut_resolver_query) as Box<Future<Item = _, Error = _>>
             });
-        Box::new(fut_handle_query)
+        fut_handle_query
     }
 
     fn run(mut self) -> io::Result<()> {
