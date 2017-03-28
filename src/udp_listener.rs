@@ -99,9 +99,13 @@ impl UdpListener {
         let mut event_loop = self.event_loop.take().unwrap();
         let service_ready_tx = self.service_ready_tx.take().unwrap();
         let stream = loop_fn::<_, Self, _, _>(self, |session| {
-            session.process().and_then(|session| Ok(Loop::Continue(session)))
+            session
+                .process()
+                .and_then(|session| Ok(Loop::Continue(session)))
         });
-        event_loop.handle().spawn(stream.map_err(|_| {}).map(|_| {}));
+        event_loop
+            .handle()
+            .spawn(stream.map_err(|_| {}).map(|_| {}));
         service_ready_tx.send(0).unwrap();
         loop {
             event_loop.turn(None)
@@ -131,7 +135,9 @@ impl UdpListener {
                     varz,
                     packet_buf: Some(vec![0u8; DNS_MAX_UDP_SIZE]),
                 };
-                udp_listener.run().expect("Unable to spawn a UDP listener");
+                udp_listener
+                    .run()
+                    .expect("Unable to spawn a UDP listener");
             })
             .unwrap();
         info!("UDP listener is ready");

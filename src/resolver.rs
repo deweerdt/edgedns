@@ -20,21 +20,18 @@ use std::collections::HashMap;
 use std::io;
 use std::net;
 use std::sync::Arc;
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::thread;
 use tokio_core::net::UdpSocket;
 use tokio_core::reactor::Core;
-use super::EdgeDNSContext;
+use super::{EdgeDNSContext, DNS_MAX_UDP_SIZE};
 use varz::Varz;
 
 #[derive(Clone, Debug)]
 pub struct ResolverResponse {
     pub response: Vec<u8>,
     pub dnssec: bool,
-}
-
-struct ExtUdpSocketTuple {
-    local_port: u16,
-    net_ext_udp_socket: net::UdpSocket,
 }
 
 struct UpstreamServer {
@@ -95,7 +92,6 @@ pub struct Resolver {
     dnstap_sender: Option<log_dnstap::Sender>,
     udp_socket: net::UdpSocket,
     pending_queries: PendingQueries,
-    ext_udp_socket_tuples: Vec<ExtUdpSocketTuple>,
     upstream_servers: Vec<UpstreamServer>,
     upstream_servers_live: Vec<usize>,
     waiting_clients_count: usize,
@@ -117,7 +113,7 @@ impl Resolver {
         let (resolver_tx, resolver_rx): (Sender<ClientQuery>, Receiver<ClientQuery>) =
             channel(edgedns_context.config.max_active_queries);
         let pending_queries = PendingQueries::new();
-        let mut ext_udp_socket_tuples: Vec<ExtUdpSocketTuple> = Vec::new();
+        let mut net_ext_udp_sockets: Vec<net::UdpSocket> = Vec::new();
         let ports = if config.udp_ports > 65535 - 1024 {
             65535 - 1024
         } else {
@@ -128,14 +124,10 @@ impl Resolver {
                 info!("Binding ports... {}/{}", port, ports)
             }
             if let Ok(net_ext_udp_socket) = net_socket_udp_bound(port) {
-                let ext_udp_socket_tuple = ExtUdpSocketTuple {
-                    local_port: port,
-                    net_ext_udp_socket: net_ext_udp_socket,
-                };
-                ext_udp_socket_tuples.push(ext_udp_socket_tuple);
+                net_ext_udp_sockets.push(net_ext_udp_socket);
             }
         }
-        if ext_udp_socket_tuples.is_empty() {
+        if net_ext_udp_sockets.is_empty() {
             panic!("Couldn't bind any ports");
         }
         let upstream_servers: Vec<UpstreamServer> = config
@@ -149,7 +141,6 @@ impl Resolver {
             dnstap_sender: edgedns_context.dnstap_sender.clone(),
             udp_socket: udp_socket,
             pending_queries: pending_queries,
-            ext_udp_socket_tuples: ext_udp_socket_tuples,
             upstream_servers: upstream_servers,
             upstream_servers_live: upstream_servers_live,
             waiting_clients_count: 0,
@@ -167,6 +158,20 @@ impl Resolver {
             .name("resolver".to_string())
             .spawn(move || {
                 let mut event_loop = Core::new().unwrap();
+                let handle = event_loop.handle();
+                for net_ext_udp_socket in net_ext_udp_sockets {
+                    let ext_udp_socket = UdpSocket::from_socket(net_ext_udp_socket,
+                                                            &handle)
+                            .expect("Cannot create an external tokio socket from a raw socket");
+                    let stream = loop_fn::<_, UdpSocket, _, _>(ext_udp_socket, |ext_udp_socket| {
+                        let fut_ext_socket = ext_udp_socket.recv_dgram(vec![0u8; DNS_MAX_UDP_SIZE]);
+                        fut_ext_socket
+                            .and_then(|(ext_udp_socket, _, _, _)| future::ok(ext_udp_socket))
+                            .map_err(|_| {})
+                            .and_then(|ext_udp_socket| Ok(Loop::Continue(ext_udp_socket)))
+                    });
+                    handle.spawn(stream.map_err(|_| {}).map(|_| {}));
+                }
                 let stream = resolver_rx.for_each(|x| {
                                                       println!("** message received: {:#?}", x);
                                                       Ok(())
