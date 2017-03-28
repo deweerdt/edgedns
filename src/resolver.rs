@@ -91,6 +91,7 @@ pub struct Resolver {
     config: Config,
     dnstap_sender: Option<log_dnstap::Sender>,
     udp_socket: net::UdpSocket,
+    net_ext_udp_sockets: Vec<net::UdpSocket>,
     pending_queries: PendingQueries,
     upstream_servers: Vec<UpstreamServer>,
     upstream_servers_live: Vec<usize>,
@@ -140,6 +141,7 @@ impl Resolver {
             config: edgedns_context.config.clone(),
             dnstap_sender: edgedns_context.dnstap_sender.clone(),
             udp_socket: udp_socket,
+            net_ext_udp_sockets: net_ext_udp_sockets,
             pending_queries: pending_queries,
             upstream_servers: upstream_servers,
             upstream_servers_live: upstream_servers_live,
@@ -157,28 +159,31 @@ impl Resolver {
         thread::Builder::new()
             .name("resolver".to_string())
             .spawn(move || {
-                let resolver_local_main = Rc::new(resolver);
-                let mut event_loop = Core::new().unwrap();
+                let resolver_rc = Rc::new(RefCell::new(resolver));
+                let mut event_loop = Core::new().expect("No event loop");
                 let handle = event_loop.handle();
-                for net_ext_udp_socket in net_ext_udp_sockets {
-                    let ext_udp_socket = UdpSocket::from_socket(net_ext_udp_socket,
-                                                            &handle)
+                info!("Registering UDP ports...");
+                for net_ext_udp_socket in &resolver_rc.borrow().net_ext_udp_sockets {
+                    let ext_udp_socket =
+                        UdpSocket::from_socket(net_ext_udp_socket.try_clone().unwrap(), &handle)
                             .expect("Cannot create an external tokio socket from a raw socket");
                     let stream = loop_fn::<_,
-                                           (UdpSocket,
-                                            Rc<Resolver>),
+                                           (UdpSocket, Rc<RefCell<Resolver>>),
                                            _,
-                                           _>((ext_udp_socket, resolver_local_main.clone()),
-                                              move |(ext_udp_socket, resolver_local)| {
+                                           _>((ext_udp_socket, resolver_rc.clone()),
+                                              move |(ext_udp_socket, resolver_rc)| {
                         let fut_ext_socket = ext_udp_socket.recv_dgram(vec![0u8; DNS_MAX_UDP_SIZE]);
                         fut_ext_socket
-                            .and_then(move |(ext_udp_socket, _, _, _)| {
-                                          let x = resolver_local.lbmode;
-                                          future::ok((ext_udp_socket, resolver_local))
+                            .and_then(|(ext_udp_socket, packet, _, _)| {
+                                          {
+                                              let mut resolver = resolver_rc.borrow_mut();
+                                              resolver.waiting_clients_count += 1;
+                                          }
+                                          future::ok((ext_udp_socket, resolver_rc))
                                       })
                             .map_err(|_| {})
-                            .and_then(move |(ext_udp_socket, resolver_local)| {
-                                          Ok(Loop::Continue((ext_udp_socket, resolver_local)))
+                            .and_then(|(ext_udp_socket, resolver_rc)| {
+                                          Ok(Loop::Continue((ext_udp_socket, resolver_rc)))
                                       })
                     });
                     handle.spawn(stream.map_err(|_| {}).map(|_| {}));
@@ -190,6 +195,7 @@ impl Resolver {
                 event_loop
                     .handle()
                     .spawn(stream.map_err(|_| {}).map(|_| {}));
+                info!("UDP ports registered");
                 loop {
                     event_loop.turn(None)
                 }
