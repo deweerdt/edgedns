@@ -10,7 +10,7 @@ pub enum ClientQueryProtocol {
     TCP,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ClientQuery {
     pub proto: ClientQueryProtocol,
     pub client_addr: Option<SocketAddr>,
