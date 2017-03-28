@@ -136,7 +136,7 @@ impl Resolver {
             .map(|s| UpstreamServer::new(s).expect("Invalid upstream server address"))
             .collect();
         let upstream_servers_live: Vec<usize> = (0..config.upstream_servers.len()).collect();
-        let mut resolver = Resolver {
+        let resolver = Resolver {
             config: edgedns_context.config.clone(),
             dnstap_sender: edgedns_context.dnstap_sender.clone(),
             udp_socket: udp_socket,
@@ -157,18 +157,29 @@ impl Resolver {
         thread::Builder::new()
             .name("resolver".to_string())
             .spawn(move || {
+                let resolver_local_main = Rc::new(resolver);
                 let mut event_loop = Core::new().unwrap();
                 let handle = event_loop.handle();
                 for net_ext_udp_socket in net_ext_udp_sockets {
                     let ext_udp_socket = UdpSocket::from_socket(net_ext_udp_socket,
                                                             &handle)
                             .expect("Cannot create an external tokio socket from a raw socket");
-                    let stream = loop_fn::<_, UdpSocket, _, _>(ext_udp_socket, |ext_udp_socket| {
+                    let stream = loop_fn::<_,
+                                           (UdpSocket,
+                                            Rc<Resolver>),
+                                           _,
+                                           _>((ext_udp_socket, resolver_local_main.clone()),
+                                              move |(ext_udp_socket, resolver_local)| {
                         let fut_ext_socket = ext_udp_socket.recv_dgram(vec![0u8; DNS_MAX_UDP_SIZE]);
                         fut_ext_socket
-                            .and_then(|(ext_udp_socket, _, _, _)| future::ok(ext_udp_socket))
+                            .and_then(move |(ext_udp_socket, _, _, _)| {
+                                          let x = resolver_local.lbmode;
+                                          future::ok((ext_udp_socket, resolver_local))
+                                      })
                             .map_err(|_| {})
-                            .and_then(|ext_udp_socket| Ok(Loop::Continue(ext_udp_socket)))
+                            .and_then(move |(ext_udp_socket, resolver_local)| {
+                                          Ok(Loop::Continue((ext_udp_socket, resolver_local)))
+                                      })
                     });
                     handle.spawn(stream.map_err(|_| {}).map(|_| {}));
                 }
