@@ -172,15 +172,7 @@ impl Resolver {
                                            _,
                                            _>((ext_udp_socket, resolver_rc.clone()),
                                               move |(ext_udp_socket, resolver_rc)| {
-                        let fut_ext_socket = ext_udp_socket.recv_dgram(vec![0u8; DNS_MAX_UDP_SIZE]);
-                        fut_ext_socket
-                            .and_then(|(ext_udp_socket, packet, _, _)| {
-                                          {
-                                              let mut resolver = resolver_rc.borrow_mut();
-                                              resolver.waiting_clients_count += 1;
-                                          }
-                                          future::ok((ext_udp_socket, resolver_rc))
-                                      })
+                        fut_ext_udp_socket(ext_udp_socket, resolver_rc)                        
                             .map_err(|_| {})
                             .and_then(|(ext_udp_socket, resolver_rc)| {
                                           Ok(Loop::Continue((ext_udp_socket, resolver_rc)))
@@ -203,6 +195,22 @@ impl Resolver {
             .unwrap();
         Ok(resolver_tx)
     }
+}
+
+fn fut_ext_udp_socket
+    (
+    ext_udp_socket: UdpSocket,
+    resolver_rc: Rc<RefCell<Resolver>>,
+) -> impl Future<Item = (UdpSocket, Rc<RefCell<Resolver>>), Error = io::Error> {
+    let fut_ext_socket = ext_udp_socket.recv_dgram(vec![0u8; DNS_MAX_UDP_SIZE]);
+    let stream = fut_ext_socket.and_then(|(ext_udp_socket, packet, _, _)| {
+                                             {
+                                                 let mut resolver = resolver_rc.borrow_mut();
+                                                 resolver.waiting_clients_count += 1;
+                                             }
+                                             future::ok((ext_udp_socket, resolver_rc))
+                                         });
+    stream
 }
 
 fn net_socket_udp_bound(port: u16) -> io::Result<net::UdpSocket> {
