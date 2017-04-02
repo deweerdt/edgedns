@@ -408,11 +408,50 @@ impl Resolver {
         resolver_rc: Rc<RefCell<Resolver>>,
         client_query: ClientQuery,
     ) -> impl Future<Item = (), Error = ()> {
-        println!("Client query received: {:#?}", client_query);
-        let mut resolver = resolver_rc.borrow_mut();
-        if resolver.upstream_servers_live.is_empty() {
-            if Self::respond_from_cache(&mut resolver, &client_query).is_ok() {
-                return future::ok(());
+        let key = {
+            let mut resolver = resolver_rc.borrow_mut();
+            if resolver.upstream_servers_live.is_empty() {
+                if Self::respond_from_cache(&mut resolver, &client_query).is_ok() {
+                    return future::ok(());
+                }
+            }
+            let normalized_question = &client_query.normalized_question;
+            let key = normalized_question.key();
+            if resolver.waiting_clients_count > resolver.config.max_waiting_clients {
+                info!("Too many waiting clients, dropping the first slot");
+                let key = match resolver.pending_queries.map.keys().next() {
+                    None => return future::ok((())),
+                    Some(key) => key.clone(),
+                };
+                if let Some(active_query) = resolver.pending_queries.map.remove(&key) {
+                    resolver.waiting_clients_count -= active_query.client_queries.len();
+                    // XXX - Cancel timeout?
+                }
+                return future::ok((()));
+            }
+            key
+        };
+        let mut create_active_query = true;
+        if let Some(active_query) =
+            resolver_rc
+                .borrow_mut()
+                .pending_queries
+                .map
+                .get_mut(&key) {
+            create_active_query = false;
+            if active_query.client_queries.len() <
+               resolver_rc
+                   .borrow()
+                   .config
+                   .max_clients_waiting_for_query {
+                active_query.client_queries.push(client_query.clone());
+                resolver_rc.borrow_mut().waiting_clients_count += 1;
+            } else {
+                info!("More than {} clients waiting for a response to the same query",
+                      resolver_rc
+                          .borrow_mut()
+                          .config
+                          .max_clients_waiting_for_query);
             }
         }
         future::ok((()))
