@@ -360,6 +360,14 @@ impl Resolver {
         stream
     }
 
+    fn fut_client_query(
+        resolver_rc: Rc<RefCell<Resolver>>,
+        client_query: ClientQuery,
+    ) -> impl Future<Item = (), Error = ()> {
+        println!("Client query received: {:#?}", client_query);
+        future::ok(())
+    }
+
     pub fn spawn(edgedns_context: &EdgeDNSContext) -> io::Result<Sender<ClientQuery>> {
         let config = &edgedns_context.config;
         let net_udp_socket = edgedns_context
@@ -434,11 +442,10 @@ impl Resolver {
                                       })
                     });
                     handle.spawn(stream.map_err(|_| {}).map(|_| {}));
-                }
-                let stream = resolver_rx.for_each(|x| {
-                                                      println!("** message received: {:#?}", x);
-                                                      Ok(())
-                                                  });
+                }                
+                let stream = resolver_rx.for_each(move |client_query| {
+                    Self::fut_client_query(resolver_rc.clone(), client_query)
+                });
                 event_loop
                     .handle()
                     .spawn(stream.map_err(|_| {}).map(|_| {}));
