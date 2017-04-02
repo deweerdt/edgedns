@@ -14,6 +14,8 @@ use jumphash::JumpHasher;
 use log_dnstap;
 use net_helpers::*;
 use nix::sys::socket::{bind, setsockopt, sockopt, SockAddr, InetAddr};
+use rand::distributions::{IndependentSample, Range};
+use rand;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::os::unix::io::FromRawFd;
 use std::collections::HashMap;
@@ -447,6 +449,73 @@ impl Resolver {
             })
             .unwrap();
         Ok(resolver_tx)
+    }
+}
+
+impl NormalizedQuestion {
+    fn pick_upstream(
+        &self,
+        upstream_servers: &Vec<UpstreamServer>,
+        upstream_servers_live: &Vec<usize>,
+        jumphasher: &JumpHasher,
+        is_retry: bool,
+        lbmode: LoadBalancingMode,
+    ) -> Result<usize, &'static str> {
+        let live_count = upstream_servers_live.len();
+        if live_count == 0 {
+            debug!("All upstream servers are down");
+            return Err("All upstream servers are down");
+        }
+        match lbmode {
+            LoadBalancingMode::Fallback => Ok(upstream_servers_live[0]),
+            LoadBalancingMode::Uniform => {
+                let mut i = jumphasher.slot(&self.qname, live_count as u32) as usize;
+                if is_retry {
+                    i = (i + 1) % live_count;
+                }
+                Ok(upstream_servers_live[i])
+            }
+            LoadBalancingMode::P2 => {
+                let mut busy_map = upstream_servers_live
+                    .iter()
+                    .map(|&i| (i, upstream_servers[i].pending_queries))
+                    .collect::<Vec<(usize, u64)>>();
+                busy_map.sort_by_key(|x| x.1);
+                let i = if busy_map.len() == 1 {
+                    0
+                } else {
+                    ((self.tid as usize) + (is_retry as usize & 1)) & 1
+                };
+                Ok(busy_map[i].0)
+            }
+        }
+    }
+
+    fn new_active_query<'t>
+        (
+        &self,
+        upstream_servers: &Vec<UpstreamServer>,
+        upstream_servers_live: &Vec<usize>,
+        net_ext_udp_sockets: &'t Vec<net::UdpSocket>,
+        jumphasher: &JumpHasher,
+        is_retry: bool,
+        lbmode: LoadBalancingMode,
+    ) -> Result<(Vec<u8>, NormalizedQuestionMinimal, usize, &'t net::UdpSocket), &'static str> {
+        let (query_packet, normalized_question_minimal) =
+            build_query_packet(self, false).expect("Unable to build a new query packet");
+        let upstream_server_idx = match self.pick_upstream(upstream_servers,
+                                                           upstream_servers_live,
+                                                           jumphasher,
+                                                           is_retry,
+                                                           lbmode) {
+            Err(e) => return Err(e),
+            Ok(upstream_server_idx) => upstream_server_idx,
+        };
+        let mut rng = rand::thread_rng();
+        let random_token_range = Range::new(0usize, net_ext_udp_sockets.len());
+        let random_token = random_token_range.ind_sample(&mut rng);
+        let net_ext_udp_socket = &net_ext_udp_sockets[random_token];
+        Ok((query_packet, normalized_question_minimal, upstream_server_idx, net_ext_udp_socket))
     }
 }
 
