@@ -20,12 +20,12 @@ use std::collections::HashMap;
 use std::io;
 use std::net;
 use std::sync::Arc;
-use std::cell::RefCell;
+use std::cell::{RefCell, RefMut};
 use std::rc::Rc;
 use std::thread;
 use tokio_core::net::UdpSocket;
 use tokio_core::reactor::Core;
-use super::{EdgeDNSContext, DNS_MAX_UDP_SIZE};
+use super::{EdgeDNSContext, DNS_MAX_UDP_SIZE, DNS_QUERY_MIN_SIZE, FAILURE_TTL};
 use varz::Varz;
 
 #[derive(Clone, Debug)]
@@ -105,6 +105,185 @@ pub struct Resolver {
 }
 
 impl Resolver {
+    fn dispatch_active_query(
+        resolver: &RefMut<Self>,
+        packet: &mut [u8],
+        normalized_question_key: &NormalizedQuestionKey,
+        client_addr: SocketAddr,
+        local_port: u16,
+    ) {
+        //
+    }
+
+    fn complete_active_query(
+        resolver: &mut RefMut<Self>,
+        packet: &mut [u8],
+        normalized_question: NormalizedQuestion,
+        client_addr: SocketAddr,
+        local_port: u16,
+        ttl: u32,
+    ) {
+        let normalized_question_key = normalized_question.key();
+        Self::dispatch_active_query(resolver,
+                                    packet,
+                                    &normalized_question_key,
+                                    client_addr,
+                                    local_port);
+        if let Some(active_query) =
+            resolver
+                .pending_queries
+                .map
+                .remove(&normalized_question_key) {
+            resolver.waiting_clients_count -= active_query.client_queries.len();
+        }
+        if rcode(packet) == DNS_RCODE_SERVFAIL {
+            match resolver.cache.get(&normalized_question_key) {
+                None => {
+                    resolver
+                        .cache
+                        .insert(normalized_question_key, packet.to_owned(), FAILURE_TTL);
+                }
+                Some(cache_entry) => {
+                    resolver
+                        .cache
+                        .insert(normalized_question_key, cache_entry.packet, FAILURE_TTL);
+                    resolver.varz.client_queries_offline.inc();
+                }
+            }
+        } else {
+            resolver
+                .cache
+                .insert(normalized_question_key, packet.to_owned(), ttl);
+        }
+    }
+
+    fn update_cache_stats(resolver: &RefMut<Self>) {
+        let cache_stats = resolver.cache.stats();
+        resolver
+            .varz
+            .cache_frequent_len
+            .set(cache_stats.frequent_len as f64);
+        resolver
+            .varz
+            .cache_recent_len
+            .set(cache_stats.recent_len as f64);
+        resolver
+            .varz
+            .cache_test_len
+            .set(cache_stats.test_len as f64);
+        resolver
+            .varz
+            .cache_inserted
+            .set(cache_stats.inserted as f64);
+        resolver
+            .varz
+            .cache_evicted
+            .set(cache_stats.evicted as f64);
+    }
+
+    fn handle_upstream_response(
+        mut resolver: &mut RefMut<Self>,
+        packet: &mut [u8],
+        client_addr: SocketAddr,
+        local_port: u16,
+    ) {
+        if packet.len() < DNS_QUERY_MIN_SIZE {
+            info!("Short response without a query, using UDP");
+            resolver.varz.upstream_errors.inc();
+            return;
+        }
+        let normalized_question = match normalize(packet, false) {
+            Err(e) => {
+                info!("Unexpected question in a response: {}", e);
+                return;
+            }
+            Ok(normalized_question) => normalized_question,
+        };
+        let ttl = match min_ttl(packet,
+                                resolver.config.min_ttl,
+                                resolver.config.max_ttl,
+                                FAILURE_TTL) {
+            Err(e) => {
+                info!("Unexpected answers in a response ({}): {}",
+                      normalized_question,
+                      e);
+                resolver.varz.upstream_errors.inc();
+                return;
+            }
+            Ok(ttl) => {
+                if rcode(packet) == DNS_RCODE_SERVFAIL {
+                    let _ = set_ttl(packet, FAILURE_TTL);
+                    FAILURE_TTL
+                } else if ttl < resolver.config.min_ttl {
+                    if resolver.decrement_ttl {
+                        let _ = set_ttl(packet, resolver.config.min_ttl);
+                    }
+                    resolver.config.min_ttl
+                } else {
+                    ttl
+                }
+            }
+        };
+        Self::complete_active_query(&mut resolver,
+                                    packet,
+                                    normalized_question,
+                                    client_addr,
+                                    local_port,
+                                    ttl);
+        Self::update_cache_stats(&resolver);
+    }
+
+    fn fut_ext_udp_socket
+        (
+        ext_udp_socket: UdpSocket,
+        resolver_rc: Rc<RefCell<Resolver>>,
+    ) -> impl Future<Item = (UdpSocket, Rc<RefCell<Resolver>>), Error = io::Error> {
+        let fut_ext_socket = ext_udp_socket.recv_dgram(vec![0u8; DNS_MAX_UDP_SIZE]);
+        let stream = fut_ext_socket.and_then(|(ext_udp_socket, mut packet, count, client_addr)| {
+            if count < DNS_HEADER_SIZE {
+                info!("Short response without a header, using UDP");
+                resolver_rc.borrow().varz.upstream_errors.inc();
+                return future::ok((ext_udp_socket, resolver_rc));
+            }
+            {
+                let mut resolver = resolver_rc.borrow_mut();
+                if let Some(idx) =
+                    resolver
+                        .upstream_servers
+                        .iter()
+                        .position(|upstream_server| upstream_server.socket_addr == client_addr) {
+                    if !resolver.upstream_servers_live.iter().any(|&x| x == idx) {
+                        resolver.upstream_servers[idx].pending_queries = 0;
+                        resolver.upstream_servers[idx].failures = 0;
+                        resolver.upstream_servers[idx].offline = false;
+                        resolver.upstream_servers_live.push(idx);
+                        resolver.upstream_servers_live.sort();
+                        info!("{} came back online",
+                              resolver.upstream_servers[idx].remote_addr);
+                    } else {
+                        if resolver.upstream_servers[idx].pending_queries > 0 {
+                            resolver.upstream_servers[idx].pending_queries -= 1;
+                        }
+                        if resolver.upstream_servers[idx].failures > 0 {
+                            resolver.upstream_servers[idx].failures -= 1;
+                            debug!("Failures count for server {} decreased to {}",
+                                   idx,
+                                   resolver.upstream_servers[idx].failures);
+                        }
+                    }
+                }
+                let packet = &mut packet[..count];
+                let local_port = ext_udp_socket
+                    .local_addr()
+                    .expect("Can't get the local address for an external UDP listener")
+                    .port();
+                Self::handle_upstream_response(&mut resolver, packet, client_addr, local_port);
+            }
+            future::ok((ext_udp_socket, resolver_rc))
+        });
+        stream
+    }
+
     pub fn spawn(edgedns_context: &EdgeDNSContext) -> io::Result<Sender<ClientQuery>> {
         let config = &edgedns_context.config;
         let udp_socket = edgedns_context
@@ -172,7 +351,7 @@ impl Resolver {
                                            _,
                                            _>((ext_udp_socket, resolver_rc.clone()),
                                               move |(ext_udp_socket, resolver_rc)| {
-                        fut_ext_udp_socket(ext_udp_socket, resolver_rc)                        
+                        Self::fut_ext_udp_socket(ext_udp_socket, resolver_rc)                        
                             .map_err(|_| {})
                             .and_then(|(ext_udp_socket, resolver_rc)| {
                                           Ok(Loop::Continue((ext_udp_socket, resolver_rc)))
@@ -195,22 +374,6 @@ impl Resolver {
             .unwrap();
         Ok(resolver_tx)
     }
-}
-
-fn fut_ext_udp_socket
-    (
-    ext_udp_socket: UdpSocket,
-    resolver_rc: Rc<RefCell<Resolver>>,
-) -> impl Future<Item = (UdpSocket, Rc<RefCell<Resolver>>), Error = io::Error> {
-    let fut_ext_socket = ext_udp_socket.recv_dgram(vec![0u8; DNS_MAX_UDP_SIZE]);
-    let stream = fut_ext_socket.and_then(|(ext_udp_socket, packet, _, _)| {
-                                             {
-                                                 let mut resolver = resolver_rc.borrow_mut();
-                                                 resolver.waiting_clients_count += 1;
-                                             }
-                                             future::ok((ext_udp_socket, resolver_rc))
-                                         });
-    stream
 }
 
 fn net_socket_udp_bound(port: u16) -> io::Result<net::UdpSocket> {
