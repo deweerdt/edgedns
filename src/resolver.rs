@@ -5,7 +5,7 @@ use dns::{NormalizedQuestion, NormalizedQuestionKey, NormalizedQuestionMinimal,
           build_query_packet, normalize, tid, set_tid, overwrite_qname, build_tc_packet,
           build_health_check_packet, build_servfail_packet, min_ttl, set_ttl, rcode,
           DNS_HEADER_SIZE, DNS_RCODE_SERVFAIL};
-use client_query::ClientQuery;
+use client_query::{ClientQuery, ClientQueryProtocol};
 use futures::Future;
 use futures::future::{self, Loop, loop_fn, FutureResult};
 use futures::sync::mpsc::{channel, Receiver, Sender};
@@ -25,7 +25,7 @@ use std::rc::Rc;
 use std::thread;
 use tokio_core::net::UdpSocket;
 use tokio_core::reactor::Core;
-use super::{EdgeDNSContext, DNS_MAX_UDP_SIZE, DNS_QUERY_MIN_SIZE, FAILURE_TTL};
+use super::{EdgeDNSContext, DNS_MAX_UDP_SIZE, DNS_QUERY_MIN_SIZE, FAILURE_TTL, UPSTREAM_TIMEOUT_MS};
 use varz::Varz;
 
 #[derive(Clone, Debug)]
@@ -90,7 +90,7 @@ impl PendingQueries {
 pub struct Resolver {
     config: Config,
     dnstap_sender: Option<log_dnstap::Sender>,
-    udp_socket: net::UdpSocket,
+    net_udp_socket: net::UdpSocket,
     net_ext_udp_sockets: Vec<net::UdpSocket>,
     pending_queries: PendingQueries,
     upstream_servers: Vec<UpstreamServer>,
@@ -105,6 +105,33 @@ pub struct Resolver {
 }
 
 impl Resolver {
+    fn verify_active_query(
+        active_query: &ActiveQuery,
+        packet: &[u8],
+        client_addr: SocketAddr,
+        local_port: u16,
+    ) -> Result<(), &'static str> {
+        if local_port != active_query.local_port {
+            debug!("Got a reponse on port {} for a query sent on port {}",
+                   local_port,
+                   active_query.local_port);
+            return Err("Response on an unexpected port");
+        }
+        if active_query.socket_addr != client_addr {
+            info!("Sent a query to {:?} but got a response from {:?}",
+                  active_query.socket_addr,
+                  client_addr);
+            return Err("Response from an unexpected peer");
+        }
+        if active_query.normalized_question_minimal.tid != tid(packet) {
+            debug!("Sent a query with tid {} but got a response for tid {:?}",
+                   active_query.normalized_question_minimal.tid,
+                   tid(packet));
+            return Err("Response with an unexpected tid");
+        }
+        Ok(())
+    }
+
     fn dispatch_active_query(
         resolver: &RefMut<Self>,
         packet: &mut [u8],
@@ -112,7 +139,53 @@ impl Resolver {
         client_addr: SocketAddr,
         local_port: u16,
     ) {
-        //
+        let active_query = match resolver
+                  .pending_queries
+                  .map
+                  .get(normalized_question_key) {
+            None => {
+                debug!("No clients waiting for this query");
+                return;
+            }
+            Some(active_query) => active_query,
+        };
+        if Self::verify_active_query(active_query, packet, client_addr, local_port).is_err() {
+            debug!("Received response is not valid for the query originally sent");
+            return;
+        }
+        if let Some(ref dnstap_sender) = resolver.dnstap_sender {
+            dnstap_sender.send_forwarder_response(packet, client_addr, local_port);
+        }
+        let client_queries = &active_query.client_queries;
+        for client_query in client_queries {
+            set_tid(packet, client_query.normalized_question.tid);
+            overwrite_qname(packet, &client_query.normalized_question.qname);
+            resolver.varz.upstream_received.inc();
+            match client_query.proto {
+                ClientQueryProtocol::UDP => {
+                    if client_query.ts.elapsed_since_recent() <
+                       Duration::from_millis(UPSTREAM_TIMEOUT_MS) {
+                        if packet.len() > client_query.normalized_question.payload_size as usize {
+                            let packet = &build_tc_packet(&client_query.normalized_question)
+                                              .unwrap();
+                            let _ = resolver
+                                .net_udp_socket
+                                .send_to(packet, client_query.client_addr.unwrap());
+                        } else {
+                            let _ = resolver
+                                .net_udp_socket
+                                .send_to(packet, client_query.client_addr.unwrap());
+                        }
+                    }
+                }
+                ClientQueryProtocol::TCP => {
+                    let resolver_response = ResolverResponse {
+                        response: packet.to_vec(),
+                        dnssec: client_query.normalized_question.dnssec,
+                    };
+                }
+            }
+        }
     }
 
     fn complete_active_query(
@@ -286,7 +359,7 @@ impl Resolver {
 
     pub fn spawn(edgedns_context: &EdgeDNSContext) -> io::Result<Sender<ClientQuery>> {
         let config = &edgedns_context.config;
-        let udp_socket = edgedns_context
+        let net_udp_socket = edgedns_context
             .udp_socket
             .try_clone()
             .expect("Unable to clone the UDP listening socket");
@@ -319,7 +392,7 @@ impl Resolver {
         let resolver = Resolver {
             config: edgedns_context.config.clone(),
             dnstap_sender: edgedns_context.dnstap_sender.clone(),
-            udp_socket: udp_socket,
+            net_udp_socket: net_udp_socket,
             net_ext_udp_sockets: net_ext_udp_sockets,
             pending_queries: pending_queries,
             upstream_servers: upstream_servers,
