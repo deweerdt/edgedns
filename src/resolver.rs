@@ -360,12 +360,62 @@ impl Resolver {
         stream
     }
 
+    fn respond_from_cache(
+        mut resolver: &mut RefMut<Self>,
+        client_query: &ClientQuery,
+    ) -> Result<(), &'static str> {
+        let normalized_question = &client_query.normalized_question;
+        let normalized_question_key = normalized_question.key();
+        let cache_entry = resolver.cache.get(&normalized_question_key);
+        let mut packet = if let Some(cache_entry) = cache_entry {
+            cache_entry.packet.clone()
+        } else {
+            return Err("Response is not present in cache");
+        };
+        debug!("Responding from cache");
+        resolver.varz.client_queries_offline.inc();
+        overwrite_qname(&mut packet, &client_query.normalized_question.qname);
+        set_tid(&mut packet, client_query.normalized_question.tid);
+        match client_query.proto {
+            ClientQueryProtocol::UDP => {
+                if client_query.ts.elapsed_since_recent() <
+                   Duration::from_millis(UPSTREAM_TIMEOUT_MS) {
+                    if packet.len() > client_query.normalized_question.payload_size as usize {
+                        let packet = build_tc_packet(&client_query.normalized_question).unwrap();
+                        let _ = resolver
+                            .net_udp_socket
+                            .send_to(&packet, client_query.client_addr.unwrap());
+                    } else {
+                        let _ = resolver
+                            .net_udp_socket
+                            .send_to(&packet, client_query.client_addr.unwrap());
+                    };
+                }
+            }
+            ClientQueryProtocol::TCP => {
+                let resolver_response = ResolverResponse {
+                    response: packet.to_vec(),
+                    dnssec: client_query.normalized_question.dnssec,
+                };
+                let tcpclient_tx = client_query.tcpclient_tx.clone().unwrap();
+                // XXX - TODO
+            }
+        }
+        Ok(())
+    }
+
     fn fut_client_query(
         resolver_rc: Rc<RefCell<Resolver>>,
         client_query: ClientQuery,
     ) -> impl Future<Item = (), Error = ()> {
         println!("Client query received: {:#?}", client_query);
-        future::ok(())
+        let mut resolver = resolver_rc.borrow_mut();
+        if resolver.upstream_servers_live.is_empty() {
+            if Self::respond_from_cache(&mut resolver, &client_query).is_ok() {
+                return future::ok(());
+            }
+        }
+        future::ok((()))
     }
 
     pub fn spawn(edgedns_context: &EdgeDNSContext) -> io::Result<Sender<ClientQuery>> {
