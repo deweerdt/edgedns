@@ -10,19 +10,21 @@ use futures::sync::mpsc::{channel, Sender, Receiver};
 use futures::Sink;
 use std::io;
 use std::marker::PhantomData;
+use std::net;
 use std::sync::Arc;
 use std::sync::mpsc;
 use std::thread;
 use super::EdgeDNSContext;
 use tokio_core::net::{UdpSocket, RecvDgram};
 use tokio_core::reactor::Core;
+use udp_stream::*;
 use varz::Varz;
 
 use super::{DNS_MAX_UDP_SIZE, DNS_QUERY_MIN_SIZE, DNS_QUERY_MAX_SIZE};
 
 pub struct UdpListener {
     event_loop: Option<Core>,
-    socket: Option<UdpSocket>,
+    net_udp_socket: net::UdpSocket,
     resolver_tx: Sender<ClientQuery>,
     service_ready_tx: Option<mpsc::SyncSender<u8>>,
     cache: Cache,
@@ -31,14 +33,24 @@ pub struct UdpListener {
 }
 
 impl UdpListener {
-    fn process<'a>(mut self) -> impl Future<Item = Self, Error = io::Error> + 'a {
-        let fut_raw_query = self.socket
-            .take()
-            .unwrap()
-            .recv_dgram(self.packet_buf.take().unwrap());
+    fn process<'a>(&mut self) -> impl Future<Item = (), Error = io::Error> + 'a {
+        let fut_raw_query = UdpStream::from_net_udp_socket(self.net_udp_socket
+                                                               .try_clone()
+                                                               .expect("Cannot clone UDP socket"),
+                                                           &self.event_loop
+                                                                .as_ref()
+                                                                .expect("Cannot get event loop")
+                                                                .handle())
+                .expect("Cannot create a UDP stream")
+                .for_each(|(packet, client_addr)| {
+                              println!("{:?}", packet);
+                              Ok(())
+                          })
+                .map_err(|_| io::Error::last_os_error());
+        fut_raw_query
+        /*
         fut_raw_query.and_then(move |(socket, packet_buf, count, client_addr)| {
             println!("received");
-            self.socket = Some(socket);
             self.packet_buf = Some(packet_buf);
             self.varz.client_queries_udp.inc();
             if count < DNS_QUERY_MIN_SIZE || count > DNS_QUERY_MAX_SIZE {
@@ -62,18 +74,13 @@ impl UdpListener {
                     if cache_entry.packet.len() > normalized_question.payload_size as usize {
                         debug!("cached, but has to be truncated");
                         let packet = dns::build_tc_packet(&normalized_question).unwrap();
-                        let _ = self.socket
-                            .as_ref()
-                            .unwrap()
-                            .send_to(&packet, &client_addr);
+                        let _ = self.net_udp_socket.send_to(&packet, &client_addr);
                         return Box::new(future::ok(self)) as Box<Future<Item = _, Error = _>>;
                     }
                     debug!("cached");
                     dns::set_tid(&mut cache_entry.packet, normalized_question.tid);
                     dns::overwrite_qname(&mut cache_entry.packet, &normalized_question.qname);
-                    let _ = self.socket
-                        .as_ref()
-                        .unwrap()
+                    let _ = self.net_udp_socket
                         .send_to(&cache_entry.packet, &client_addr);
                     return Box::new(future::ok(self)) as Box<Future<Item = _, Error = _>>;
                 }
@@ -94,21 +101,20 @@ impl UdpListener {
                 .map(move |_| self);
             Box::new(fut_resolver_query) as Box<Future<Item = _, Error = _>>
         })
+        */
     }
 
     fn run(mut self) -> io::Result<()> {
-        debug!("udp listener socket={:?}", self.socket);
-        let mut event_loop = self.event_loop.take().unwrap();
+        debug!("udp listener socket={:?}", self.net_udp_socket);
         let service_ready_tx = self.service_ready_tx.take().unwrap();
-        let stream = loop_fn::<_, Self, _, _>(self, |session| {
-            session
-                .process()
-                .and_then(|session| Ok(Loop::Continue(session)))
-        });
-        event_loop
+        let stream = self.process();
+        self.event_loop
+            .as_ref()
+            .unwrap()
             .handle()
             .spawn(stream.map_err(|_| {}).map(|_| {}));
         service_ready_tx.send(0).unwrap();
+        let mut event_loop = self.event_loop.as_mut().unwrap();
         loop {
             event_loop.turn(None)
         }
@@ -126,11 +132,9 @@ impl UdpListener {
             .name("udp_listener".to_string())
             .spawn(move || {
                 let event_loop = Core::new().unwrap();
-                let udp_socket = UdpSocket::from_socket(net_udp_socket, &event_loop.handle())
-                    .expect("Unable to use a local UDP listener");
                 let udp_listener = UdpListener {
                     event_loop: Some(event_loop),
-                    socket: Some(udp_socket),
+                    net_udp_socket: net_udp_socket,
                     resolver_tx,
                     service_ready_tx: Some(service_ready_tx),
                     cache,
@@ -144,21 +148,5 @@ impl UdpListener {
             .unwrap();
         info!("UDP listener is ready");
         Ok(udp_listener_th)
-    }
-}
-
-use std::rc::Rc;
-
-struct UdpStream {
-    zok: Rc<Vec<u8>>,
-}
-
-impl Stream for UdpStream {
-    type Item = Rc<Vec<u8>>;
-    type Error = io::Error;
-
-    fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
-        let buf = self.zok.clone();
-        Ok(Async::Ready(Some(buf)))
     }
 }
