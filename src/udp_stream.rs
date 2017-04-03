@@ -24,23 +24,19 @@ impl UdpStream {
 }
 
 impl Stream for UdpStream {
-    type Item = (Rc<Vec<u8>>, usize, SocketAddr);
+    type Item = (Rc<Vec<u8>>, SocketAddr);
     type Error = io::Error;
 
     fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
-        let (count, client_ip) = {
+        let client_ip = {
             let bufw = Rc::get_mut(&mut self.buf).unwrap();
+            let capacity = bufw.capacity();
+            unsafe { bufw.set_len(capacity) };
             let (count, client_ip) = try_nb!(self.udp_socket.recv_from(bufw));
-            (count, client_ip)
+            unsafe { bufw.set_len(count) };
+            client_ip
         };
         let buf = self.buf.clone();
-        Ok(Async::Ready(Some((buf, count, client_ip))))
+        Ok(Async::Ready(Some((buf, client_ip))))
     }
-}
-
-fn zok(u: UdpStream) {
-    u.for_each(|x| {
-                   x = 4;
-                   Ok(())
-               });
 }
