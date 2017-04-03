@@ -438,20 +438,14 @@ impl Resolver {
                 .pending_queries
                 .map
                 .get_mut(&key) {
+            let resolver = resolver_rc.borrow();
             create_active_query = false;
-            if active_query.client_queries.len() <
-               resolver_rc
-                   .borrow()
-                   .config
-                   .max_clients_waiting_for_query {
+            if active_query.client_queries.len() < resolver.config.max_clients_waiting_for_query {
                 active_query.client_queries.push(client_query.clone());
                 resolver_rc.borrow_mut().waiting_clients_count += 1;
             } else {
                 info!("More than {} clients waiting for a response to the same query",
-                      resolver_rc
-                          .borrow_mut()
-                          .config
-                          .max_clients_waiting_for_query);
+                      resolver.config.max_clients_waiting_for_query);
             }
         }
         future::ok((()))
