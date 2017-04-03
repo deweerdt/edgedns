@@ -13,13 +13,17 @@ pub struct UdpStream {
 }
 
 impl UdpStream {
-    pub fn from_net_udp_socket(
-        net_udp_socket: net::UdpSocket,
-        handle: Handle,
-    ) -> Result<Self, io::Error> {
-        let udp_socket = UdpSocket::from_socket(net_udp_socket, &handle)?;
+    pub fn from_socket(udp_socket: UdpSocket) -> Result<Self, io::Error> {
         let buf = Rc::new(vec![0; DNS_MAX_UDP_SIZE]);
         Ok(UdpStream { udp_socket, buf })
+    }
+
+    pub fn from_net_udp_socket(
+        net_udp_socket: net::UdpSocket,
+        handle: &Handle,
+    ) -> Result<Self, io::Error> {
+        let udp_socket = UdpSocket::from_socket(net_udp_socket, handle)?;
+        Self::from_socket(udp_socket)
     }
 }
 
