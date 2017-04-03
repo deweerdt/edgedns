@@ -3,11 +3,13 @@ use cache::Cache;
 use client_query::*;
 use coarsetime::Instant;
 use dns;
-use futures::Future;
+use futures::{Async, Future, Poll};
 use futures::future::{self, Loop, loop_fn, FutureResult};
+use futures::stream::{Fuse, Peekable, Stream};
 use futures::sync::mpsc::{channel, Sender, Receiver};
 use futures::Sink;
 use std::io;
+use std::marker::PhantomData;
 use std::sync::Arc;
 use std::sync::mpsc;
 use std::thread;
@@ -142,5 +144,21 @@ impl UdpListener {
             .unwrap();
         info!("UDP listener is ready");
         Ok(udp_listener_th)
+    }
+}
+
+use std::rc::Rc;
+
+struct UdpStream {
+    zok: Rc<Vec<u8>>,
+}
+
+impl Stream for UdpStream {
+    type Item = Rc<Vec<u8>>;
+    type Error = io::Error;
+
+    fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
+        let buf = self.zok.clone();
+        Ok(Async::Ready(Some(buf)))
     }
 }

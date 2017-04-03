@@ -1,0 +1,46 @@
+use futures::{Async, Stream, Poll};
+use net::SocketAddr;
+use std::io;
+use std::net;
+use std::rc::Rc;
+use tokio_core::net::UdpSocket;
+use tokio_core::reactor::Handle;
+use super::DNS_MAX_UDP_SIZE;
+
+pub struct UdpStream {
+    udp_socket: UdpSocket,
+    buf: Rc<Vec<u8>>,
+}
+
+impl UdpStream {
+    pub fn from_net_udp_socket(
+        net_udp_socket: net::UdpSocket,
+        handle: Handle,
+    ) -> Result<Self, io::Error> {
+        let udp_socket = UdpSocket::from_socket(net_udp_socket, &handle)?;
+        let buf = Rc::new(vec![0; DNS_MAX_UDP_SIZE]);
+        Ok(UdpStream { udp_socket, buf })
+    }
+}
+
+impl Stream for UdpStream {
+    type Item = (Rc<Vec<u8>>, usize, SocketAddr);
+    type Error = io::Error;
+
+    fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
+        let (count, client_ip) = {
+            let bufw = Rc::get_mut(&mut self.buf).unwrap();
+            let (count, client_ip) = try_nb!(self.udp_socket.recv_from(bufw));
+            (count, client_ip)
+        };
+        let buf = self.buf.clone();
+        Ok(Async::Ready(Some((buf, count, client_ip))))
+    }
+}
+
+fn zok(u: UdpStream) {
+    u.for_each(|x| {
+                   x = 4;
+                   Ok(())
+               });
+}

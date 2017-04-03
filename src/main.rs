@@ -13,6 +13,7 @@ extern crate clap;
 extern crate coarsetime;
 extern crate dnstap;
 extern crate env_logger;
+#[macro_use]
 extern crate futures;
 extern crate jumphash;
 extern crate net2;
@@ -23,6 +24,7 @@ extern crate siphasher;
 extern crate slab;
 extern crate socket_priority;
 extern crate tokio_core;
+#[macro_use]
 extern crate tokio_io;
 extern crate tokio_timer;
 extern crate toml;
@@ -44,6 +46,7 @@ mod net_helpers;
 mod resolver;
 mod tcp_listener;
 mod udp_listener;
+mod udp_stream;
 mod varz;
 
 #[cfg(feature = "webservice")]
