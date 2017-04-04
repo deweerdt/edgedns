@@ -23,12 +23,14 @@ use varz::Varz;
 use super::{DNS_MAX_UDP_SIZE, DNS_QUERY_MIN_SIZE, DNS_QUERY_MAX_SIZE};
 
 struct UdpListener {
+    net_udp_socket: net::UdpSocket,
     resolver_tx: Sender<ClientQuery>,
     cache: Cache,
     varz: Arc<Varz>,
 }
 
 pub struct UdpListenerCore {
+    net_udp_socket: net::UdpSocket,
     resolver_tx: Sender<ClientQuery>,
     cache: Cache,
     varz: Arc<Varz>,
@@ -38,58 +40,81 @@ pub struct UdpListenerCore {
 impl UdpListener {
     fn new(udp_listener_core: &UdpListenerCore) -> Self {
         UdpListener {
+            net_udp_socket: udp_listener_core
+                .net_udp_socket
+                .try_clone()
+                .expect("Couldn't clone a UDP socket"),
             resolver_tx: udp_listener_core.resolver_tx.clone(),
             cache: udp_listener_core.cache.clone(),
             varz: udp_listener_core.varz.clone(),
         }
     }
 
-    fn process<'a>(self,
-                   handle: &Handle,
-                   net_udp_socket: net::UdpSocket)
-                   -> impl Future<Item = (), Error = io::Error> + 'a {
-        debug!("udp listener socket={:?}", net_udp_socket);
-        let fut_raw_query = UdpStream::from_net_udp_socket(net_udp_socket, handle)
-            .expect("Cannot create a UDP stream")
-            .for_each(move |(packet, client_addr)| {
-                println!("received {:?}", packet);
-                let count = packet.len();
-                if count < DNS_QUERY_MIN_SIZE || count > DNS_QUERY_MAX_SIZE {
-                    info!("Short query using UDP");
-                    self.varz.client_queries_errors.inc();
-                    return Ok(());
-                }
-                let normalized_question = match dns::normalize(&packet, true) {
-                    Ok(normalized_question) => normalized_question,
-                    Err(e) => {
-                        debug!("Error while parsing the question: {}", e);
-                        self.varz.client_queries_errors.inc();
-                        return Ok(());
-                    }
-                };
-                Ok(())
-            })
-            .map_err(|_| io::Error::last_os_error());
-        fut_raw_query
+    fn fut_process_stream(mut self, handle: &Handle) -> Box<Future<Item = (), Error = io::Error>> {
+        let fut_raw_query =
+            UdpStream::from_net_udp_socket(self.net_udp_socket
+                                               .try_clone()
+                                               .expect("Unable to clone UDP socket"),
+                                           handle)
+                    .expect("Cannot create a UDP stream")
+                    .for_each(move |(packet, client_addr)| {
+                        println!("received {:?}", packet);
+                        let count = packet.len();
+                        if count < DNS_QUERY_MIN_SIZE || count > DNS_QUERY_MAX_SIZE {
+                            info!("Short query using UDP");
+                            self.varz.client_queries_errors.inc();
+                            return Box::new(future::ok(())) as Box<Future<Item = _, Error = _>>;
+                        }
+                        let normalized_question = match dns::normalize(&packet, true) {
+                            Ok(normalized_question) => normalized_question,
+                            Err(e) => {
+                                debug!("Error while parsing the question: {}", e);
+                                self.varz.client_queries_errors.inc();
+                                return Box::new(future::ok(())) as Box<Future<Item = _, Error = _>>;
+                            }
+                        };
+                        let cache_entry = self.cache.get2(&normalized_question);
+                        if let Some(mut cache_entry) = cache_entry {
+                            if !cache_entry.is_expired() {
+                                self.varz.client_queries_cached.inc();
+                                if cache_entry.packet.len() >
+                                   normalized_question.payload_size as usize {
+                                    debug!("cached, but has to be truncated");
+                                    let packet = dns::build_tc_packet(&normalized_question)
+                                        .unwrap();
+                                    let _ = self.net_udp_socket.send_to(&packet, &client_addr);
+                                    return Box::new(future::ok(())) as
+                                           Box<Future<Item = _, Error = _>>;
+                                }
+                                debug!("cached");
+                                dns::set_tid(&mut cache_entry.packet, normalized_question.tid);
+                                dns::overwrite_qname(&mut cache_entry.packet,
+                                                     &normalized_question.qname);
+                                let _ = self.net_udp_socket
+                                    .send_to(&cache_entry.packet, &client_addr);
+                                return Box::new(future::ok(())) as Box<Future<Item = _, Error = _>>;
+                            }
+                            debug!("expired");
+                            self.varz.client_queries_expired.inc();
+                        }
+                        let client_query = ClientQuery {
+                            proto: ClientQueryProtocol::UDP,
+                            client_addr: Some(client_addr),
+                            tcpclient_tx: None,
+                            normalized_question: normalized_question,
+                            ts: Instant::recent(),
+                        };
+                        let fut_resolver_query = self.resolver_tx
+                            .clone()
+                            .send(client_query)
+                            .map_err(|_| io::Error::last_os_error())
+                            .map(move |_| {});
+                        Box::new(fut_resolver_query) as Box<Future<Item = _, Error = _>>
+                    })
+                    .map_err(|_| io::Error::last_os_error());
+        Box::new(fut_raw_query) as Box<Future<Item = _, Error = _>>
         /*
-        fut_raw_query.and_then(move |(socket, packet_buf, count, client_addr)| {
-            println!("received");
-            self.packet_buf = Some(packet_buf);
-            self.varz.client_queries_udp.inc();
-            if count < DNS_QUERY_MIN_SIZE || count > DNS_QUERY_MAX_SIZE {
-                info!("Short query using UDP");
-                self.varz.client_queries_errors.inc();
-                return Box::new(future::ok(self)) as Box<Future<Item = _, Error = _>>;
-            }
-            let normalized_question =
-                match dns::normalize(&self.packet_buf.as_ref().unwrap()[..count], true) {
-                    Ok(normalized_question) => normalized_question,
-                    Err(e) => {
-                        debug!("Error while parsing the question: {}", e);
-                        self.varz.client_queries_errors.inc();
-                        return Box::new(future::ok(self)) as Box<Future<Item = _, Error = _>>;
-                    }
-                };
+        fut_raw_query.and_then(move |(socket, packet_buf, count, client_addr)|
             let cache_entry = self.cache.get2(&normalized_question);
             if let Some(mut cache_entry) = cache_entry {
                 if !cache_entry.is_expired() {
@@ -129,13 +154,9 @@ impl UdpListener {
 }
 
 impl UdpListenerCore {
-    fn run(mut self,
-           mut event_loop: Core,
-           udp_listener: UdpListener,
-           net_udp_socket: net::UdpSocket)
-           -> io::Result<()> {
+    fn run(mut self, mut event_loop: Core, udp_listener: UdpListener) -> io::Result<()> {
         let service_ready_tx = self.service_ready_tx.take().unwrap();
-        let stream = udp_listener.process(&event_loop.handle(), net_udp_socket);
+        let stream = udp_listener.fut_process_stream(&event_loop.handle());
         event_loop
             .handle()
             .spawn(stream.map_err(|_| {}).map(|_| {}));
@@ -158,6 +179,7 @@ impl UdpListenerCore {
             .spawn(move || {
                 let event_loop = Core::new().unwrap();
                 let udp_listener_core = UdpListenerCore {
+                    net_udp_socket: net_udp_socket,
                     cache: cache,
                     resolver_tx: resolver_tx,
                     service_ready_tx: Some(service_ready_tx),
@@ -165,7 +187,7 @@ impl UdpListenerCore {
                 };
                 let udp_listener = UdpListener::new(&udp_listener_core);
                 udp_listener_core
-                    .run(event_loop, udp_listener, net_udp_socket)
+                    .run(event_loop, udp_listener)
                     .expect("Unable to spawn a UDP listener");
             })
             .unwrap();
