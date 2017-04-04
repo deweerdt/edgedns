@@ -10,7 +10,8 @@ use futures::sync::mpsc::{channel, Sender, Receiver};
 use futures::Sink;
 use std::io;
 use std::marker::PhantomData;
-use std::net;
+use std::net::{self, SocketAddr};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::mpsc;
 use std::thread;
@@ -50,6 +51,60 @@ impl UdpListener {
         }
     }
 
+    fn fut_process_query(&mut self,
+                         packet: Rc<Vec<u8>>,
+                         client_addr: SocketAddr)
+                         -> Box<Future<Item = (), Error = io::Error>> {
+        println!("received {:?}", packet);
+        let count = packet.len();
+        if count < DNS_QUERY_MIN_SIZE || count > DNS_QUERY_MAX_SIZE {
+            info!("Short query using UDP");
+            self.varz.client_queries_errors.inc();
+            return Box::new(future::ok(())) as Box<Future<Item = _, Error = _>>;
+        }
+        let normalized_question = match dns::normalize(&packet, true) {
+            Ok(normalized_question) => normalized_question,
+            Err(e) => {
+                debug!("Error while parsing the question: {}", e);
+                self.varz.client_queries_errors.inc();
+                return Box::new(future::ok(())) as Box<Future<Item = _, Error = _>>;
+            }
+        };
+        let cache_entry = self.cache.get2(&normalized_question);
+        if let Some(mut cache_entry) = cache_entry {
+            if !cache_entry.is_expired() {
+                self.varz.client_queries_cached.inc();
+                if cache_entry.packet.len() > normalized_question.payload_size as usize {
+                    debug!("cached, but has to be truncated");
+                    let packet = dns::build_tc_packet(&normalized_question).unwrap();
+                    let _ = self.net_udp_socket.send_to(&packet, &client_addr);
+                    return Box::new(future::ok(())) as Box<Future<Item = _, Error = _>>;
+                }
+                debug!("cached");
+                dns::set_tid(&mut cache_entry.packet, normalized_question.tid);
+                dns::overwrite_qname(&mut cache_entry.packet, &normalized_question.qname);
+                let _ = self.net_udp_socket
+                    .send_to(&cache_entry.packet, &client_addr);
+                return Box::new(future::ok(())) as Box<Future<Item = _, Error = _>>;
+            }
+            debug!("expired");
+            self.varz.client_queries_expired.inc();
+        }
+        let client_query = ClientQuery {
+            proto: ClientQueryProtocol::UDP,
+            client_addr: Some(client_addr),
+            tcpclient_tx: None,
+            normalized_question: normalized_question,
+            ts: Instant::recent(),
+        };
+        let fut_resolver_query = self.resolver_tx
+            .clone()
+            .send(client_query)
+            .map_err(|_| io::Error::last_os_error())
+            .map(move |_| {});
+        Box::new(fut_resolver_query) as Box<Future<Item = _, Error = _>>
+    }
+
     fn fut_process_stream(mut self, handle: &Handle) -> Box<Future<Item = (), Error = io::Error>> {
         let fut_raw_query =
             UdpStream::from_net_udp_socket(self.net_udp_socket
@@ -58,98 +113,10 @@ impl UdpListener {
                                            handle)
                     .expect("Cannot create a UDP stream")
                     .for_each(move |(packet, client_addr)| {
-                        println!("received {:?}", packet);
-                        let count = packet.len();
-                        if count < DNS_QUERY_MIN_SIZE || count > DNS_QUERY_MAX_SIZE {
-                            info!("Short query using UDP");
-                            self.varz.client_queries_errors.inc();
-                            return Box::new(future::ok(())) as Box<Future<Item = _, Error = _>>;
-                        }
-                        let normalized_question = match dns::normalize(&packet, true) {
-                            Ok(normalized_question) => normalized_question,
-                            Err(e) => {
-                                debug!("Error while parsing the question: {}", e);
-                                self.varz.client_queries_errors.inc();
-                                return Box::new(future::ok(())) as Box<Future<Item = _, Error = _>>;
-                            }
-                        };
-                        let cache_entry = self.cache.get2(&normalized_question);
-                        if let Some(mut cache_entry) = cache_entry {
-                            if !cache_entry.is_expired() {
-                                self.varz.client_queries_cached.inc();
-                                if cache_entry.packet.len() >
-                                   normalized_question.payload_size as usize {
-                                    debug!("cached, but has to be truncated");
-                                    let packet = dns::build_tc_packet(&normalized_question)
-                                        .unwrap();
-                                    let _ = self.net_udp_socket.send_to(&packet, &client_addr);
-                                    return Box::new(future::ok(())) as
-                                           Box<Future<Item = _, Error = _>>;
-                                }
-                                debug!("cached");
-                                dns::set_tid(&mut cache_entry.packet, normalized_question.tid);
-                                dns::overwrite_qname(&mut cache_entry.packet,
-                                                     &normalized_question.qname);
-                                let _ = self.net_udp_socket
-                                    .send_to(&cache_entry.packet, &client_addr);
-                                return Box::new(future::ok(())) as Box<Future<Item = _, Error = _>>;
-                            }
-                            debug!("expired");
-                            self.varz.client_queries_expired.inc();
-                        }
-                        let client_query = ClientQuery {
-                            proto: ClientQueryProtocol::UDP,
-                            client_addr: Some(client_addr),
-                            tcpclient_tx: None,
-                            normalized_question: normalized_question,
-                            ts: Instant::recent(),
-                        };
-                        let fut_resolver_query = self.resolver_tx
-                            .clone()
-                            .send(client_query)
-                            .map_err(|_| io::Error::last_os_error())
-                            .map(move |_| {});
-                        Box::new(fut_resolver_query) as Box<Future<Item = _, Error = _>>
-                    })
+                                  self.fut_process_query(packet, client_addr)
+                              })
                     .map_err(|_| io::Error::last_os_error());
         Box::new(fut_raw_query) as Box<Future<Item = _, Error = _>>
-        /*
-        fut_raw_query.and_then(move |(socket, packet_buf, count, client_addr)|
-            let cache_entry = self.cache.get2(&normalized_question);
-            if let Some(mut cache_entry) = cache_entry {
-                if !cache_entry.is_expired() {
-                    self.varz.client_queries_cached.inc();
-                    if cache_entry.packet.len() > normalized_question.payload_size as usize {
-                        debug!("cached, but has to be truncated");
-                        let packet = dns::build_tc_packet(&normalized_question).unwrap();
-                        let _ = self.net_udp_socket.send_to(&packet, &client_addr);
-                        return Box::new(future::ok(self)) as Box<Future<Item = _, Error = _>>;
-                    }
-                    debug!("cached");
-                    dns::set_tid(&mut cache_entry.packet, normalized_question.tid);
-                    dns::overwrite_qname(&mut cache_entry.packet, &normalized_question.qname);
-                    let _ = self.net_udp_socket
-                        .send_to(&cache_entry.packet, &client_addr);
-                    return Box::new(future::ok(self)) as Box<Future<Item = _, Error = _>>;
-                }
-                debug!("expired");
-                self.varz.client_queries_expired.inc();
-            }
-            let client_query = ClientQuery {
-                proto: ClientQueryProtocol::UDP,
-                client_addr: Some(client_addr),
-                tcpclient_tx: None,
-                normalized_question: normalized_question,
-                ts: Instant::recent(),
-            };
-            let fut_resolver_query = self.resolver_tx
-                .clone()
-                .send(client_query)
-                .map_err(|_| io::Error::last_os_error())
-                .map(move |_| self);
-            Box::new(fut_resolver_query) as Box<Future<Item = _, Error = _>>
-        })
-        */
     }
 }
 
