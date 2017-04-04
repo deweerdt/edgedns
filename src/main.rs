@@ -164,7 +164,7 @@ impl EdgeDNS {
         let (service_ready_tx, service_ready_rx) = mpsc::sync_channel::<u8>(1);
         let mut tasks: Vec<thread::JoinHandle<()>> = Vec::new();
         for _ in 0..config.udp_listener_threads {
-            let udp_listener = UdpListener::spawn(&edgedns_context,
+            let udp_listener = UdpListenerCore::spawn(&edgedns_context,
                                                   resolver_tx.clone(),
                                                   service_ready_tx.clone())
                     .expect("Unable to spawn a UDP listener");
