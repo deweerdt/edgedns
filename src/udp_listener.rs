@@ -33,7 +33,7 @@ pub struct UdpListener {
 }
 
 impl UdpListener {
-    fn process<'a>(&mut self) -> impl Future<Item = (), Error = io::Error> + 'a {
+    fn process<'a>(&'a mut self) -> impl Future<Item = (), Error = io::Error> + 'a {
         let fut_raw_query = UdpStream::from_net_udp_socket(self.net_udp_socket
                                                                .try_clone()
                                                                .expect("Cannot clone UDP socket"),
@@ -43,9 +43,23 @@ impl UdpListener {
                                                                 .handle())
                 .expect("Cannot create a UDP stream")
                 .for_each(|(packet, client_addr)| {
-                              println!("{:?}", packet);
-                              Ok(())
-                          })
+                    println!("received {:?}", packet);
+                    let count = packet.len();
+                    if count < DNS_QUERY_MIN_SIZE || count > DNS_QUERY_MAX_SIZE {
+                        info!("Short query using UDP");
+                        self.varz.client_queries_errors.inc();
+                        return Ok(());
+                    }
+                    let normalized_question = match dns::normalize(&packet, true) {
+                        Ok(normalized_question) => normalized_question,
+                        Err(e) => {
+                            debug!("Error while parsing the question: {}", e);
+                            self.varz.client_queries_errors.inc();
+                            return Ok(());
+                        }
+                    };
+                    Ok(())
+                })
                 .map_err(|_| io::Error::last_os_error());
         fut_raw_query
         /*
@@ -149,3 +163,4 @@ impl UdpListener {
         Ok(udp_listener_th)
     }
 }
+
