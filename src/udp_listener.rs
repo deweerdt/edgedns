@@ -120,11 +120,10 @@ impl UdpListener {
         }
     }
 
-    pub fn spawn(
-        edgedns_context: &EdgeDNSContext,
-        resolver_tx: Sender<ClientQuery>,
-        service_ready_tx: mpsc::SyncSender<u8>,
-    ) -> io::Result<(thread::JoinHandle<()>)> {
+    pub fn spawn(edgedns_context: &EdgeDNSContext,
+                 resolver_tx: Sender<ClientQuery>,
+                 service_ready_tx: mpsc::SyncSender<u8>)
+                 -> io::Result<(thread::JoinHandle<()>)> {
         let net_udp_socket = edgedns_context.udp_socket.try_clone()?;
         let cache = edgedns_context.cache.clone();
         let varz = edgedns_context.varz.clone();
