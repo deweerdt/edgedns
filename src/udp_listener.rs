@@ -105,7 +105,9 @@ impl UdpListener {
         Box::new(fut_resolver_query) as Box<Future<Item = _, Error = _>>
     }
 
-    fn fut_process_stream(mut self, handle: &Handle) -> Box<Future<Item = (), Error = io::Error>> {
+    fn fut_process_stream<'a>(mut self,
+                              handle: &Handle)
+                              -> impl Future<Item = (), Error = io::Error> + 'a {
         let fut_raw_query =
             UdpStream::from_net_udp_socket(self.net_udp_socket
                                                .try_clone()
@@ -116,7 +118,7 @@ impl UdpListener {
                                   self.fut_process_query(packet, client_addr)
                               })
                     .map_err(|_| io::Error::last_os_error());
-        Box::new(fut_raw_query) as Box<Future<Item = _, Error = _>>
+        fut_raw_query
     }
 }
 
