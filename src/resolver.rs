@@ -398,6 +398,7 @@ impl Resolver {
     fn fut_client_query(resolver_rc: Rc<RefCell<Resolver>>,
                         client_query: ClientQuery)
                         -> impl Future<Item = (), Error = ()> {
+        info!("Client query received by the resolver");
         let key = {
             let mut resolver = resolver_rc.borrow_mut();
             if resolver.upstream_servers_live.is_empty() {

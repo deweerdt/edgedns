@@ -9,7 +9,6 @@ use futures::stream::{Fuse, Peekable, Stream};
 use futures::sync::mpsc::{channel, Sender, Receiver};
 use futures::Sink;
 use std::io;
-use std::marker::PhantomData;
 use std::net::{self, SocketAddr};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -125,11 +124,11 @@ impl UdpListener {
 impl UdpListenerCore {
     fn run(mut self, mut event_loop: Core, udp_listener: UdpListener) -> io::Result<()> {
         let service_ready_tx = self.service_ready_tx.take().unwrap();
-        let stream = udp_listener.fut_process_stream(&event_loop.handle());
-        event_loop
-            .handle()
-            .spawn(stream.map_err(|_| {}).map(|_| {}));
-        service_ready_tx.send(0).unwrap();
+        let handle = event_loop.handle();
+        let stream = udp_listener.fut_process_stream(&handle);
+        handle.spawn(stream.map_err(|_| {}).map(|_| {}));
+        service_ready_tx.send(0)
+            .map_err(|_| io::Error::last_os_error())?;
         loop {
             event_loop.turn(None)
         }
