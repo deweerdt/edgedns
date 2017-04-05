@@ -139,6 +139,31 @@ impl ExtResponse {
     }
 }
 
+struct ClientQueriesHandler;
+
+impl ClientQueriesHandler {
+    fn new() -> Self {
+        ClientQueriesHandler
+    }
+
+    fn fut_process_stream<'a>(mut self,
+                              resolver_rx: Receiver<ClientQuery>)
+                              -> impl Future<Item = (), Error = io::Error> + 'a {
+        let fut_client_query = resolver_rx.for_each(move |client_query| {
+                                                        self.fut_process_client_query(client_query)
+                                                            .map_err(|_| {})
+                                                    });
+        fut_client_query.map_err(|_| io::Error::last_os_error())
+    }
+
+    fn fut_process_client_query(&mut self,
+                                client_query: ClientQuery)
+                                -> Box<Future<Item = (), Error = io::Error>> {
+        info!("Incoming client query {:#?}", client_query);
+        Box::new(future::ok(()))
+    }
+}
+
 pub struct ResolverCore {
     config: Config,
     dnstap_sender: Option<log_dnstap::Sender>,
@@ -227,7 +252,8 @@ impl ResolverCore {
                         ext_response_listener.fut_process_stream(&handle, net_ext_udp_socket);
                     handle.spawn(stream.map_err(|_| {}).map(|_| {}));
                 }
-                let stream = resolver_rx.for_each(move |client_query| Ok(()));
+                let client_queries_handler = ClientQueriesHandler::new();
+                let stream = client_queries_handler.fut_process_stream(resolver_rx);
                 event_loop
                     .handle()
                     .spawn(stream.map_err(|_| {}).map(|_| {}));
