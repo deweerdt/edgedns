@@ -160,7 +160,7 @@ impl EdgeDNS {
             varz: varz,
             dnstap_sender: dnstap_sender,
         };
-        let resolver_tx = Resolver::spawn(&edgedns_context).expect("Unable to spawn the resolver");
+        let resolver_tx = ResolverCore::spawn(&edgedns_context).expect("Unable to spawn the resolver");
         let (service_ready_tx, service_ready_rx) = mpsc::sync_channel::<u8>(1);
         let mut tasks: Vec<thread::JoinHandle<()>> = Vec::new();
         for _ in 0..config.udp_listener_threads {
