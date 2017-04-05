@@ -139,11 +139,13 @@ impl ExtResponse {
     }
 }
 
-struct ClientQueriesHandler;
+struct ClientQueriesHandler {
+    pending_queries: PendingQueries,
+}
 
 impl ClientQueriesHandler {
-    fn new() -> Self {
-        ClientQueriesHandler
+    fn new(resolver_core: &ResolverCore) -> Self {
+        ClientQueriesHandler { pending_queries: resolver_core.pending_queries.clone() }
     }
 
     fn fut_process_stream<'a>(mut self,
@@ -252,7 +254,7 @@ impl ResolverCore {
                         ext_response_listener.fut_process_stream(&handle, net_ext_udp_socket);
                     handle.spawn(stream.map_err(|_| {}).map(|_| {}));
                 }
-                let client_queries_handler = ClientQueriesHandler::new();
+                let client_queries_handler = ClientQueriesHandler::new(&resolver_core);
                 let stream = client_queries_handler.fut_process_stream(resolver_rx);
                 event_loop
                     .handle()
