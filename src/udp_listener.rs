@@ -127,7 +127,8 @@ impl UdpListenerCore {
         let handle = event_loop.handle();
         let stream = udp_listener.fut_process_stream(&handle);
         handle.spawn(stream.map_err(|_| {}).map(|_| {}));
-        service_ready_tx.send(0)
+        service_ready_tx
+            .send(0)
             .map_err(|_| io::Error::last_os_error())?;
         loop {
             event_loop.turn(None)

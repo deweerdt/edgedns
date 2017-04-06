@@ -99,20 +99,28 @@ pub struct ExtResponse {
     config: Config,
     dnstap_sender: Option<log_dnstap::Sender>,
     pending_queries: PendingQueries,
+    waiting_clients_count: Rc<AtomicUsize>,
+    upstream_servers_arc: Arc<Mutex<Vec<UpstreamServer>>>,
     cache: Cache,
     varz: Arc<Varz>,
     decrement_ttl: bool,
+    local_port: u16,
+    net_udp_socket: net::UdpSocket,
 }
 
 impl ExtResponse {
-    fn new(resolver_core: &ResolverCore) -> Self {
+    fn new(resolver_core: &ResolverCore, local_port: u16) -> Self {
         ExtResponse {
             config: resolver_core.config.clone(),
             dnstap_sender: resolver_core.dnstap_sender.clone(),
             pending_queries: resolver_core.pending_queries.clone(),
+            waiting_clients_count: resolver_core.waiting_clients_count.clone(),
+            upstream_servers_arc: resolver_core.upstream_servers_arc.clone(),
             cache: resolver_core.cache.clone(),
             varz: resolver_core.varz.clone(),
             decrement_ttl: resolver_core.decrement_ttl,
+            local_port: local_port,
+            net_udp_socket: resolver_core.net_udp_socket.try_clone().unwrap(),
         }
     }
 
@@ -134,11 +142,164 @@ impl ExtResponse {
     }
 
     fn fut_process_ext_socket(&mut self,
-                              packet: Rc<Vec<u8>>,
+                              mut packet: Rc<Vec<u8>>,
                               client_addr: SocketAddr)
                               -> Box<Future<Item = (), Error = io::Error>> {
         println!("received on an external socket {:?}", packet);
+        if packet.len() < DNS_QUERY_MIN_SIZE {
+            info!("Short response received over UDP");
+            self.varz.upstream_errors.inc();
+            return Box::new(future::ok((())));
+        }
+        let upstream_idx =
+            match self.upstream_servers_arc
+                      .lock()
+                      .unwrap()
+                      .iter()
+                      .position(|upstream_server| upstream_server.socket_addr == client_addr) {
+                Some(upstream_idx) => upstream_idx,
+                None => {
+                    debug!("Got a response from an unexpected upstream server");
+                    return Box::new(future::ok((())));
+                }                
+            };
+        println!("upstream_idx: {}", upstream_idx);
+        let normalized_question = match normalize(&packet, false) {
+            Err(e) => {
+                info!("Unexpected question in a response: {}", e);
+                return Box::new(future::ok((())));
+            }
+            Ok(normalized_question) => normalized_question,
+        };
+        let mut packet = (*packet).clone();
+        let ttl = match min_ttl(&packet,
+                                self.config.min_ttl,
+                                self.config.max_ttl,
+                                FAILURE_TTL) {
+            Err(e) => {
+                info!("Unexpected answers in a response ({}): {}",
+                      normalized_question,
+                      e);
+                self.varz.upstream_errors.inc();
+                return Box::new(future::ok((())));
+            }
+            Ok(ttl) => {
+                if rcode(&packet) == DNS_RCODE_SERVFAIL {
+                    let _ = set_ttl(&mut packet, FAILURE_TTL);
+                    FAILURE_TTL
+                } else if ttl < self.config.min_ttl {
+                    if self.decrement_ttl {
+                        let _ = set_ttl(&mut packet, self.config.min_ttl);
+                    }
+                    self.config.min_ttl
+                } else {
+                    ttl
+                }
+            }
+        };
+        println!("normalized question: {:#?} ttl: {:?}",
+                 normalized_question,
+                 ttl);
+        let normalized_question_key = normalized_question.key();
+        {
+            let map = self.pending_queries.map_arc.lock().unwrap();
+            let pending_query = match map.get(&normalized_question_key) {
+                None => {
+                    debug!("No clients waiting for this query");
+                    return Box::new(future::ok((())));
+                }
+                Some(pending_query) => pending_query,
+            };
+            if self.local_port != pending_query.local_port {
+                debug!("Got a reponse on port {} for a query sent on port {}",
+                       self.local_port,
+                       pending_query.local_port);
+                return Box::new(future::ok((())));
+            }
+            if client_addr != pending_query.socket_addr {
+                info!("Sent a query to {:?} but got a response from {:?}",
+                      pending_query.socket_addr,
+                      client_addr);
+                return Box::new(future::ok((())));
+
+            }
+            if pending_query.normalized_question_minimal.tid != tid(&packet) {
+                debug!("Sent a query with tid {} but got a response for tid {:?}",
+                       pending_query.normalized_question_minimal.tid,
+                       tid(&packet));
+                return Box::new(future::ok((())));
+            }
+            if let Some(ref dnstap_sender) = self.dnstap_sender {
+                dnstap_sender.send_forwarder_response(&packet, client_addr, self.local_port);
+            }
+            let client_queries = &pending_query.client_queries;
+            for client_query in client_queries {
+                set_tid(&mut packet, client_query.normalized_question.tid);
+                overwrite_qname(&mut packet, &client_query.normalized_question.qname);
+                self.varz.upstream_received.inc();
+                match client_query.proto {
+                    ClientQueryProtocol::UDP => {
+                        if client_query.ts.elapsed_since_recent() <
+                           Duration::from_millis(UPSTREAM_TIMEOUT_MS) {
+                            if packet.len() >
+                               client_query.normalized_question.payload_size as usize {
+                                let packet = &build_tc_packet(&client_query.normalized_question)
+                                                  .unwrap();
+                                let _ = self.net_udp_socket
+                                    .send_to(&packet, client_query.client_addr.unwrap());
+                            } else {
+                                let _ = self.net_udp_socket
+                                    .send_to(&packet, client_query.client_addr.unwrap());
+                            };
+                        }
+                    }
+                    ClientQueryProtocol::TCP => {
+                        //
+                    }
+                }
+            }
+        }
+        {
+            let mut map = self.pending_queries.map_arc.lock().unwrap();
+            if let Some(pending_query) = map.remove(&normalized_question_key) {
+                self.waiting_clients_count
+                    .store(pending_query.client_queries.len(), Relaxed);
+            }
+            if rcode(&packet) == DNS_RCODE_SERVFAIL {
+                match self.cache.get(&normalized_question_key) {
+                    None => {
+                        self.cache
+                            .insert(normalized_question_key, packet, FAILURE_TTL);
+                    }
+                    Some(cache_entry) => {
+                        self.cache
+                            .insert(normalized_question_key, cache_entry.packet, FAILURE_TTL);
+                        self.varz.client_queries_offline.inc();
+                    }
+                }
+            } else {
+                self.cache.insert(normalized_question_key, packet, ttl);
+            }
+        }
+        self.update_cache_stats();
         Box::new(future::ok((())))
+    }
+
+    fn update_cache_stats(&mut self) {
+        let cache_stats = self.cache.stats();
+        self.varz
+            .cache_frequent_len
+            .set(cache_stats.frequent_len as f64);
+        self.varz
+            .cache_recent_len
+            .set(cache_stats.recent_len as f64);
+        self.varz
+            .cache_test_len
+            .set(cache_stats.test_len as f64);
+        self.varz
+            .cache_inserted
+            .set(cache_stats.inserted as f64);
+        self.varz.cache_evicted.set(cache_stats.evicted as f64);
     }
 }
 
@@ -332,7 +493,9 @@ impl ResolverCore {
                 let handle = event_loop.handle();
                 info!("Registering UDP ports...");
                 for net_ext_udp_socket in &*resolver_core.net_ext_udp_sockets_rc {
-                    let ext_response_listener = ExtResponse::new(&resolver_core);
+                    let ext_response_listener =
+                        ExtResponse::new(&resolver_core,
+                                         net_ext_udp_socket.local_addr().unwrap().port());
                     let stream =
                         ext_response_listener.fut_process_stream(&handle, net_ext_udp_socket);
                     handle.spawn(stream.map_err(|_| {}).map(|_| {}));
@@ -432,4 +595,3 @@ fn net_socket_udp_bound(port: u16) -> io::Result<net::UdpSocket> {
     let net_socket: net::UdpSocket = unsafe { net::UdpSocket::from_raw_fd(socket_fd) };
     Ok(net_socket)
 }
-
