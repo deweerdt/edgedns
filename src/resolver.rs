@@ -145,7 +145,7 @@ impl ExtResponse {
                               mut packet: Rc<Vec<u8>>,
                               client_addr: SocketAddr)
                               -> Box<Future<Item = (), Error = io::Error>> {
-        println!("received on an external socket {:?}", packet);
+        debug!("received on an external socket {:?}", packet);
         if packet.len() < DNS_QUERY_MIN_SIZE {
             info!("Short response received over UDP");
             self.varz.upstream_errors.inc();
@@ -163,7 +163,7 @@ impl ExtResponse {
                     return Box::new(future::ok((())));
                 }                
             };
-        println!("upstream_idx: {}", upstream_idx);
+        debug!("upstream_idx: {}", upstream_idx);
         let normalized_question = match normalize(&packet, false) {
             Err(e) => {
                 info!("Unexpected question in a response: {}", e);
@@ -197,9 +197,6 @@ impl ExtResponse {
                 }
             }
         };
-        println!("normalized question: {:#?} ttl: {:?}",
-                 normalized_question,
-                 ttl);
         let normalized_question_key = normalized_question.key();
         {
             let map = self.pending_queries.map_arc.lock().unwrap();
