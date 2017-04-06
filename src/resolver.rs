@@ -74,10 +74,10 @@ pub enum LoadBalancingMode {
 
 #[derive(Clone)]
 struct PendingQueries {
-    map_arc: Arc<Mutex<HashMap<NormalizedQuestionKey, ActiveQuery>>>,
+    map_arc: Arc<Mutex<HashMap<NormalizedQuestionKey, PendingQuery>>>,
 }
 
-struct ActiveQuery {
+struct PendingQuery {
     normalized_question_minimal: NormalizedQuestionMinimal,
     socket_addr: SocketAddr,
     local_port: u16,
@@ -182,15 +182,24 @@ impl ClientQueriesHandler {
         let normalized_question = &client_query.normalized_question;
         let key = normalized_question.key();
         if self.waiting_clients_count.load(Relaxed) > self.config.max_waiting_clients {
+            info!("Too many waiting clients, dropping the first slot");
             let mut map = self.pending_queries.map_arc.lock().unwrap();
             let key = match map.keys().next() {
                 None => return Box::new(future::ok((()))),
                 Some(key) => key.clone(),
             };
-            if let Some(active_query) = map.remove(&key) {
+            if let Some(pending_query) = map.remove(&key) {
                 self.waiting_clients_count
-                    .fetch_sub(active_query.client_queries.len(), Relaxed);
+                    .fetch_sub(pending_query.client_queries.len(), Relaxed);
             }
+        }
+        if let Some(pending_query) =
+            self.pending_queries
+                .map_arc
+                .lock()
+                .unwrap()
+                .get_mut(&key) {
+            //
         }
         Box::new(future::ok(()))
     }
@@ -338,7 +347,7 @@ impl NormalizedQuestion {
         }
     }
 
-    fn new_active_query<'t>
+    fn new_pending_query<'t>
         (&self,
          upstream_servers: &Vec<UpstreamServer>,
          upstream_servers_live: &Vec<usize>,
