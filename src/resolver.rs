@@ -31,7 +31,8 @@ use std::thread;
 use udp_stream::*;
 use tokio_core::net::UdpSocket;
 use tokio_core::reactor::{Core, Handle};
-use super::{EdgeDNSContext, DNS_MAX_UDP_SIZE, DNS_QUERY_MIN_SIZE, FAILURE_TTL, UPSTREAM_TIMEOUT_MS};
+use super::{EdgeDNSContext, DNS_MAX_UDP_SIZE, DNS_QUERY_MIN_SIZE, FAILURE_TTL,
+            UPSTREAM_TIMEOUT_MS, UPSTREAM_INITIAL_TIMEOUT_MS};
 use varz::Varz;
 
 #[derive(Clone, Debug)]
@@ -143,18 +144,24 @@ impl ExtResponse {
 
 struct ClientQueriesHandler {
     config: Config,
+    net_ext_udp_sockets_rc: Rc<Vec<net::UdpSocket>>,
     pending_queries: PendingQueries,
+    upstream_servers_arc: Arc<Mutex<Vec<UpstreamServer>>>,
     upstream_servers_live_arc: Arc<Mutex<Vec<usize>>>,
     waiting_clients_count: Rc<AtomicUsize>,
+    jumphasher: JumpHasher,
 }
 
 impl ClientQueriesHandler {
     fn new(resolver_core: &ResolverCore) -> Self {
         ClientQueriesHandler {
             config: resolver_core.config.clone(),
+            net_ext_udp_sockets_rc: resolver_core.net_ext_udp_sockets_rc.clone(),
             pending_queries: resolver_core.pending_queries.clone(),
+            upstream_servers_arc: resolver_core.upstream_servers_arc.clone(),
             upstream_servers_live_arc: resolver_core.upstream_servers_live_arc.clone(),
             waiting_clients_count: resolver_core.waiting_clients_count.clone(),
+            jumphasher: resolver_core.jumphasher,
         }
     }
 
@@ -199,7 +206,42 @@ impl ClientQueriesHandler {
                 pending_query.client_queries.push(client_query.clone());
                 self.waiting_clients_count
                     .store(pending_query.client_queries.len(), Relaxed);
+                return Box::new(future::ok(()));
             }
+        }
+        {
+            let upstream_servers = self.upstream_servers_arc.lock().unwrap();
+            let (query_packet,
+                 normalized_question_minimal,
+                 upstream_server_idx,
+                 net_ext_udp_socket) = match normalized_question
+                      .new_pending_query(&upstream_servers,
+                                         &self.upstream_servers_live_arc.lock().unwrap(),
+                                         &self.net_ext_udp_sockets_rc,
+                                         &self.jumphasher,
+                                         false,
+                                         self.config.lbmode) {
+                Err(_) => return Box::new(future::ok(())),
+                Ok(res) => res,
+            };
+            let upstream_server = &upstream_servers[upstream_server_idx];
+            let pending_query = PendingQuery {
+                normalized_question_minimal: normalized_question_minimal,
+                socket_addr: upstream_server.socket_addr,
+                local_port: net_ext_udp_socket.local_addr().unwrap().port(),
+                client_queries: vec![client_query.clone()],
+                ts: Instant::recent(),
+                delay: UPSTREAM_INITIAL_TIMEOUT_MS,
+                upstream_server_idx: upstream_server_idx,
+            };
+            self.waiting_clients_count
+                .store(pending_query.client_queries.len(), Relaxed);
+            let mut map = self.pending_queries.map_arc.lock().unwrap();
+            debug!("Sending {:#?} to {:?}",
+                   pending_query.normalized_question_minimal,
+                   pending_query.socket_addr);
+            map.insert(key, pending_query);
+            let _ = net_ext_udp_socket.send_to(&query_packet, &upstream_server.socket_addr);
         }
         Box::new(future::ok(()))
     }
@@ -209,9 +251,9 @@ pub struct ResolverCore {
     config: Config,
     dnstap_sender: Option<log_dnstap::Sender>,
     net_udp_socket: net::UdpSocket,
-    net_ext_udp_sockets: Vec<net::UdpSocket>,
+    net_ext_udp_sockets_rc: Rc<Vec<net::UdpSocket>>,
     pending_queries: PendingQueries,
-    upstream_servers: Vec<UpstreamServer>,
+    upstream_servers_arc: Arc<Mutex<Vec<UpstreamServer>>>,
     upstream_servers_live_arc: Arc<Mutex<Vec<usize>>>,
     waiting_clients_count: Rc<AtomicUsize>,
     cache: Cache,
@@ -256,6 +298,7 @@ impl ResolverCore {
             .collect();
         let upstream_servers_live: Vec<usize> = (0..config.upstream_servers.len()).collect();
         let upstream_servers_live_arc = Arc::new(Mutex::new(upstream_servers_live));
+        let upstream_servers_arc = Arc::new(Mutex::new(upstream_servers));
         if config.decrement_ttl {
             info!("Resolver mode: TTL will be automatically decremented");
         }
@@ -274,9 +317,9 @@ impl ResolverCore {
                     config: config,
                     dnstap_sender: dnstap_sender,
                     net_udp_socket: net_udp_socket,
-                    net_ext_udp_sockets: net_ext_udp_sockets,
+                    net_ext_udp_sockets_rc: Rc::new(net_ext_udp_sockets),
                     pending_queries: pending_queries,
-                    upstream_servers: upstream_servers,
+                    upstream_servers_arc: upstream_servers_arc,
                     upstream_servers_live_arc: upstream_servers_live_arc,
                     waiting_clients_count: Rc::new(AtomicUsize::new(0)),
                     cache: cache,
@@ -288,7 +331,7 @@ impl ResolverCore {
                 };
                 let handle = event_loop.handle();
                 info!("Registering UDP ports...");
-                for net_ext_udp_socket in &resolver_core.net_ext_udp_sockets {
+                for net_ext_udp_socket in &*resolver_core.net_ext_udp_sockets_rc {
                     let ext_response_listener = ExtResponse::new(&resolver_core);
                     let stream =
                         ext_response_listener.fut_process_stream(&handle, net_ext_udp_socket);
