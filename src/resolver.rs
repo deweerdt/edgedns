@@ -193,13 +193,13 @@ impl ClientQueriesHandler {
                     .fetch_sub(pending_query.client_queries.len(), Relaxed);
             }
         }
-        if let Some(pending_query) =
-            self.pending_queries
-                .map_arc
-                .lock()
-                .unwrap()
-                .get_mut(&key) {
-            //
+        {
+            let mut pending_queries = self.pending_queries.map_arc.lock().unwrap();
+            if let Some(pending_query) = pending_queries.get_mut(&key) {
+                pending_query.client_queries.push(client_query.clone());
+                self.waiting_clients_count
+                    .store(pending_query.client_queries.len(), Relaxed);
+            }
         }
         Box::new(future::ok(()))
     }
