@@ -24,6 +24,8 @@ use std::net;
 use std::sync::Arc;
 use std::cell::{RefCell, RefMut};
 use std::rc::Rc;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering::Relaxed;
 use std::sync::Mutex;
 use std::thread;
 use udp_stream::*;
@@ -140,12 +142,20 @@ impl ExtResponse {
 }
 
 struct ClientQueriesHandler {
+    config: Config,
     pending_queries: PendingQueries,
+    upstream_servers_live_arc: Arc<Mutex<Vec<usize>>>,
+    waiting_clients_count: Rc<AtomicUsize>,
 }
 
 impl ClientQueriesHandler {
     fn new(resolver_core: &ResolverCore) -> Self {
-        ClientQueriesHandler { pending_queries: resolver_core.pending_queries.clone() }
+        ClientQueriesHandler {
+            config: resolver_core.config.clone(),
+            pending_queries: resolver_core.pending_queries.clone(),
+            upstream_servers_live_arc: resolver_core.upstream_servers_live_arc.clone(),
+            waiting_clients_count: resolver_core.waiting_clients_count.clone(),
+        }
     }
 
     fn fut_process_stream<'a>(mut self,
@@ -162,6 +172,26 @@ impl ClientQueriesHandler {
                                 client_query: ClientQuery)
                                 -> Box<Future<Item = (), Error = io::Error>> {
         info!("Incoming client query {:#?}", client_query);
+        if self.upstream_servers_live_arc
+               .lock()
+               .unwrap()
+               .is_empty() {
+            // Respond from cache
+            return Box::new(future::ok(()));
+        }
+        let normalized_question = &client_query.normalized_question;
+        let key = normalized_question.key();
+        if self.waiting_clients_count.load(Relaxed) > self.config.max_waiting_clients {
+            let mut map = self.pending_queries.map_arc.lock().unwrap();
+            let key = match map.keys().next() {
+                None => return Box::new(future::ok((()))),
+                Some(key) => key.clone(),
+            };
+            if let Some(active_query) = map.remove(&key) {
+                self.waiting_clients_count
+                    .fetch_sub(active_query.client_queries.len(), Relaxed);
+            }
+        }
         Box::new(future::ok(()))
     }
 }
@@ -173,8 +203,8 @@ pub struct ResolverCore {
     net_ext_udp_sockets: Vec<net::UdpSocket>,
     pending_queries: PendingQueries,
     upstream_servers: Vec<UpstreamServer>,
-    upstream_servers_live: Vec<usize>,
-    waiting_clients_count: usize,
+    upstream_servers_live_arc: Arc<Mutex<Vec<usize>>>,
+    waiting_clients_count: Rc<AtomicUsize>,
     cache: Cache,
     varz: Arc<Varz>,
     decrement_ttl: bool,
@@ -216,6 +246,7 @@ impl ResolverCore {
             .map(|s| UpstreamServer::new(s).expect("Invalid upstream server address"))
             .collect();
         let upstream_servers_live: Vec<usize> = (0..config.upstream_servers.len()).collect();
+        let upstream_servers_live_arc = Arc::new(Mutex::new(upstream_servers_live));
         if config.decrement_ttl {
             info!("Resolver mode: TTL will be automatically decremented");
         }
@@ -237,8 +268,8 @@ impl ResolverCore {
                     net_ext_udp_sockets: net_ext_udp_sockets,
                     pending_queries: pending_queries,
                     upstream_servers: upstream_servers,
-                    upstream_servers_live: upstream_servers_live,
-                    waiting_clients_count: 0,
+                    upstream_servers_live_arc: upstream_servers_live_arc,
+                    waiting_clients_count: Rc::new(AtomicUsize::new(0)),
                     cache: cache,
                     varz: varz,
                     decrement_ttl: decrement_ttl,
