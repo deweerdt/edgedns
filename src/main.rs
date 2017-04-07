@@ -40,6 +40,7 @@ mod client_query;
 mod client;
 mod config;
 mod dns;
+mod ext_response;
 #[cfg(feature = "nightly")]
 mod log_dnstap;
 mod net_helpers;
