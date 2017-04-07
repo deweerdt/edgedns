@@ -9,6 +9,7 @@ use client_query::{ClientQuery, ClientQueryProtocol};
 use futures::Future;
 use futures::future::{self, Loop, loop_fn, FutureResult};
 use futures::sync::mpsc::{channel, Receiver, Sender};
+use futures::sync::oneshot;
 use futures::Stream;
 use jumphash::JumpHasher;
 use log_dnstap;
@@ -28,9 +29,11 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::Mutex;
 use std::thread;
+use std::time;
 use udp_stream::*;
 use tokio_core::net::UdpSocket;
 use tokio_core::reactor::{Core, Handle};
+use tokio_timer::{wheel, Timer, TimeoutError};
 use super::{EdgeDNSContext, DNS_MAX_UDP_SIZE, DNS_QUERY_MIN_SIZE, FAILURE_TTL,
             UPSTREAM_TIMEOUT_MS, UPSTREAM_INITIAL_TIMEOUT_MS};
 use varz::Varz;
@@ -86,6 +89,7 @@ struct PendingQuery {
     ts: Instant,
     delay: u64,
     upstream_server_idx: usize,
+    done_tx: oneshot::Sender<()>,
 }
 
 impl PendingQueries {
@@ -259,6 +263,7 @@ impl ExtResponse {
         {
             let mut map = self.pending_queries.map_arc.lock().unwrap();
             if let Some(pending_query) = map.remove(&normalized_question_key) {
+                pending_query.done_tx.send(());
                 self.waiting_clients_count
                     .store(pending_query.client_queries.len(), Relaxed);
             }
@@ -308,10 +313,14 @@ struct ClientQueriesHandler {
     upstream_servers_live_arc: Arc<Mutex<Vec<usize>>>,
     waiting_clients_count: Rc<AtomicUsize>,
     jumphasher: JumpHasher,
+    timer: Timer,
 }
 
 impl ClientQueriesHandler {
     fn new(resolver_core: &ResolverCore) -> Self {
+        let timer = wheel()
+            .max_capacity(resolver_core.config.max_active_queries)
+            .build();
         ClientQueriesHandler {
             config: resolver_core.config.clone(),
             net_ext_udp_sockets_rc: resolver_core.net_ext_udp_sockets_rc.clone(),
@@ -320,6 +329,7 @@ impl ClientQueriesHandler {
             upstream_servers_live_arc: resolver_core.upstream_servers_live_arc.clone(),
             waiting_clients_count: resolver_core.waiting_clients_count.clone(),
             jumphasher: resolver_core.jumphasher,
+            timer: timer,
         }
     }
 
@@ -341,7 +351,7 @@ impl ClientQueriesHandler {
                .lock()
                .unwrap()
                .is_empty() {
-            // Respond from cache
+            // Respond with stale records rom cache
             return Box::new(future::ok(()));
         }
         let normalized_question = &client_query.normalized_question;
@@ -383,6 +393,7 @@ impl ClientQueriesHandler {
                 Ok(res) => res,
             };
             let upstream_server = &upstream_servers[upstream_server_idx];
+            let (done_tx, done_rx) = oneshot::channel();
             let pending_query = PendingQuery {
                 normalized_question_minimal: normalized_question_minimal,
                 socket_addr: upstream_server.socket_addr,
@@ -391,6 +402,7 @@ impl ClientQueriesHandler {
                 ts: Instant::recent(),
                 delay: UPSTREAM_INITIAL_TIMEOUT_MS,
                 upstream_server_idx: upstream_server_idx,
+                done_tx: done_tx,
             };
             self.waiting_clients_count
                 .store(pending_query.client_queries.len(), Relaxed);
@@ -400,6 +412,16 @@ impl ClientQueriesHandler {
                    pending_query.socket_addr);
             map.insert(key, pending_query);
             let _ = net_ext_udp_socket.send_to(&query_packet, &upstream_server.socket_addr);
+            let done_rx = done_rx.map_err(|_| ());
+            let timeout = self.timer.timeout(done_rx, time::Duration::from_secs(1));
+            let fut = timeout
+                .map(|_| {})
+                .map_err(|_| {
+                             println!("TIMEOUT!");
+                             io::Error::last_os_error()
+                         })
+                .then(|_| future::ok(()));
+            return Box::new(fut);
         }
         Box::new(future::ok(()))
     }
