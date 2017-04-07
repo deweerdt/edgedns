@@ -204,7 +204,7 @@ impl ExtResponse {
                       self.config.min_ttl,
                       self.config.max_ttl,
                       FAILURE_TTL) {
-            Err(e) => {
+            Err(_) => {
                 self.varz.upstream_errors.inc();
                 Err("Unexpected RRs in a response")
             }
@@ -402,7 +402,7 @@ impl ClientQueriesHandler {
         fut_client_query.map_err(|_| io::Error::last_os_error())
     }
 
-    fn cap_pending_queries(&mut self, normalized_question_key: &NormalizedQuestionKey) -> bool {
+    fn cap_pending_queries(&mut self) -> bool {
         if self.waiting_clients_count.load(Relaxed) < self.config.max_waiting_clients {
             return false;
         }
@@ -448,7 +448,7 @@ impl ClientQueriesHandler {
         }
         let normalized_question = &client_query.normalized_question;
         let key = normalized_question.key();
-        self.cap_pending_queries(&key);
+        self.cap_pending_queries();
         if self.maybe_add_to_existing_pending_query(&key, &client_query) {
             return Box::new(future::ok(()));
         }

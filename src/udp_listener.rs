@@ -106,17 +106,13 @@ impl UdpListener {
     fn fut_process_stream<'a>(mut self,
                               handle: &Handle)
                               -> impl Future<Item = (), Error = io::Error> + 'a {
-        let fut_raw_query =
-            UdpStream::from_net_udp_socket(self.net_udp_socket
-                                               .try_clone()
-                                               .expect("Unable to clone UDP socket"),
-                                           handle)
-                    .expect("Cannot create a UDP stream")
-                    .for_each(move |(packet, client_addr)| {
-                                  self.fut_process_query(packet, client_addr)
-                              })
-                    .map_err(|_| io::Error::last_os_error());
-        fut_raw_query
+        UdpStream::from_net_udp_socket(self.net_udp_socket
+                                           .try_clone()
+                                           .expect("Unable to clone UDP socket"),
+                                       handle)
+                .expect("Cannot create a UDP stream")
+                .for_each(move |(packet, client_addr)| self.fut_process_query(packet, client_addr))
+                .map_err(|_| io::Error::last_os_error())
     }
 }
 
