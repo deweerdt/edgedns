@@ -36,8 +36,9 @@ extern crate hyper;
 extern crate prometheus;
 
 mod cache;
-mod client_query;
 mod client;
+mod client_query;
+mod client_queries_handler;
 mod config;
 mod dns;
 mod ext_response;
