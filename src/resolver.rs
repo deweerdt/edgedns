@@ -417,10 +417,10 @@ impl ClientQueriesHandler {
             let fut = timeout
                 .map(|_| {})
                 .map_err(|_| {
-                             println!("TIMEOUT!");
+                             println!("TIMEOUT!");                             
                              io::Error::last_os_error()
                          })
-                .then(|_| future::ok(()));
+                .or_else(|_| future::ok(()));
             return Box::new(fut);
         }
         Box::new(future::ok(()))
