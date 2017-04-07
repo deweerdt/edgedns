@@ -76,11 +76,6 @@ pub enum LoadBalancingMode {
     P2,
 }
 
-#[derive(Clone)]
-struct PendingQueries {
-    map_arc: Arc<Mutex<HashMap<NormalizedQuestionKey, PendingQuery>>>,
-}
-
 struct PendingQuery {
     normalized_question_minimal: NormalizedQuestionMinimal,
     socket_addr: SocketAddr,
@@ -92,8 +87,34 @@ struct PendingQuery {
     done_tx: oneshot::Sender<()>,
 }
 
+impl PendingQuery {
+    fn new(normalized_question_minimal: NormalizedQuestionMinimal,
+           upstream_server: &UpstreamServer,
+           upstream_server_idx: usize,
+           net_ext_udp_socket: &net::UdpSocket,
+           client_query: &ClientQuery,
+           done_tx: oneshot::Sender<()>)
+           -> Self {
+        PendingQuery {
+            normalized_question_minimal: normalized_question_minimal,
+            socket_addr: upstream_server.socket_addr,
+            local_port: net_ext_udp_socket.local_addr().unwrap().port(),
+            client_queries: vec![client_query.clone()],
+            ts: Instant::recent(),
+            delay: UPSTREAM_INITIAL_TIMEOUT_MS,
+            upstream_server_idx: upstream_server_idx,
+            done_tx: done_tx,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct PendingQueries {
+    map_arc: Arc<Mutex<HashMap<NormalizedQuestionKey, PendingQuery>>>,
+}
+
 impl PendingQueries {
-    fn new() -> PendingQueries {
+    fn new() -> Self {
         let map_arc = Arc::new(Mutex::new(HashMap::new()));
         PendingQueries { map_arc: map_arc }
     }
@@ -225,28 +246,30 @@ impl ExtResponse {
         self.update_cache_stats();
     }
 
-    fn dispatch_client_query(&self, mut packet: &mut [u8], client_query: &ClientQuery) -> Result<(), &'static str> {
-         set_tid(&mut packet, client_query.normalized_question.tid);
-            overwrite_qname(&mut packet, &client_query.normalized_question.qname);
-            self.varz.upstream_received.inc();
-            match client_query.proto {
-                ClientQueryProtocol::UDP => {
-                    if client_query.ts.elapsed_since_recent() <
-                       Duration::from_millis(UPSTREAM_TIMEOUT_MS) {
-                        if packet.len() > client_query.normalized_question.payload_size as usize {
-                            let packet = &build_tc_packet(&client_query.normalized_question)
-                                              .unwrap();
-                            let _ = self.net_udp_socket
-                                .send_to(&packet, client_query.client_addr.unwrap());
-                        } else {
-                            let _ = self.net_udp_socket
-                                .send_to(&packet, client_query.client_addr.unwrap());
-                        };
-                    }
+    fn dispatch_client_query(&self,
+                             mut packet: &mut [u8],
+                             client_query: &ClientQuery)
+                             -> Result<(), &'static str> {
+        set_tid(&mut packet, client_query.normalized_question.tid);
+        overwrite_qname(&mut packet, &client_query.normalized_question.qname);
+        self.varz.upstream_received.inc();
+        match client_query.proto {
+            ClientQueryProtocol::UDP => {
+                if client_query.ts.elapsed_since_recent() <
+                   Duration::from_millis(UPSTREAM_TIMEOUT_MS) {
+                    if packet.len() > client_query.normalized_question.payload_size as usize {
+                        let packet = &build_tc_packet(&client_query.normalized_question).unwrap();
+                        let _ = self.net_udp_socket
+                            .send_to(&packet, client_query.client_addr.unwrap());
+                    } else {
+                        let _ = self.net_udp_socket
+                            .send_to(&packet, client_query.client_addr.unwrap());
+                    };
                 }
-                ClientQueryProtocol::TCP => {}
             }
-            Ok(())
+            ClientQueryProtocol::TCP => {}
+        }
+        Ok(())
     }
 
     fn dispatch_client_queries(&self,
@@ -254,7 +277,7 @@ impl ExtResponse {
                                client_queries: &Vec<ClientQuery>)
                                -> Result<(), &'static str> {
         for client_query in client_queries {
-            let _ = self.dispatch_client_query(packet, client_query);         
+            let _ = self.dispatch_client_query(packet, client_query);
         }
         Ok(())
     }
@@ -379,6 +402,39 @@ impl ClientQueriesHandler {
         fut_client_query.map_err(|_| io::Error::last_os_error())
     }
 
+    fn cap_pending_queries(&mut self, normalized_question_key: &NormalizedQuestionKey) -> bool {
+        if self.waiting_clients_count.load(Relaxed) < self.config.max_waiting_clients {
+            return false;
+        }
+        info!("Too many waiting clients, dropping the first slot");
+        let mut map = self.pending_queries.map_arc.lock().unwrap();
+        let key = match map.keys().next() {
+            None => return false,
+            Some(key) => key.clone(),
+        };
+        if let Some(pending_query) = map.remove(&key) {
+            self.waiting_clients_count
+                .fetch_sub(pending_query.client_queries.len(), Relaxed);
+        }
+        true
+    }
+
+    fn maybe_add_to_existing_pending_query(&mut self,
+                                           normalized_question_key: &NormalizedQuestionKey,
+                                           client_query: &ClientQuery)
+                                           -> bool {
+        let mut pending_queries = self.pending_queries.map_arc.lock().unwrap();
+        match pending_queries.get_mut(&normalized_question_key) {
+            None => false,
+            Some(pending_query) => {
+                pending_query.client_queries.push(client_query.clone());
+                self.waiting_clients_count
+                    .store(pending_query.client_queries.len(), Relaxed);
+                true
+            }
+        }
+    }
+
     fn fut_process_client_query(&mut self,
                                 client_query: ClientQuery)
                                 -> Box<Future<Item = (), Error = io::Error>> {
@@ -392,143 +448,116 @@ impl ClientQueriesHandler {
         }
         let normalized_question = &client_query.normalized_question;
         let key = normalized_question.key();
-        if self.waiting_clients_count.load(Relaxed) > self.config.max_waiting_clients {
-            info!("Too many waiting clients, dropping the first slot");
-            let mut map = self.pending_queries.map_arc.lock().unwrap();
-            let key = match map.keys().next() {
-                None => return Box::new(future::ok((()))),
-                Some(key) => key.clone(),
-            };
-            if let Some(pending_query) = map.remove(&key) {
-                self.waiting_clients_count
-                    .fetch_sub(pending_query.client_queries.len(), Relaxed);
-            }
+        self.cap_pending_queries(&key);
+        if self.maybe_add_to_existing_pending_query(&key, &client_query) {
+            return Box::new(future::ok(()));
         }
-        {
-            let mut pending_queries = self.pending_queries.map_arc.lock().unwrap();
-            if let Some(pending_query) = pending_queries.get_mut(&key) {
-                pending_query.client_queries.push(client_query.clone());
-                self.waiting_clients_count
-                    .store(pending_query.client_queries.len(), Relaxed);
-                return Box::new(future::ok(()));
-            }
-        }
-        {
-            let mut upstream_servers = self.upstream_servers_arc.lock().unwrap();
-            let (query_packet,
-                 normalized_question_minimal,
-                 upstream_server_idx,
-                 net_ext_udp_socket) = match normalized_question
-                      .new_pending_query(&upstream_servers,
-                                         &self.upstream_servers_live_arc.lock().unwrap(),
-                                         &self.net_ext_udp_sockets_rc,
-                                         &self.jumphasher,
-                                         false,
-                                         self.config.lbmode) {
+        let mut upstream_servers = self.upstream_servers_arc.lock().unwrap();
+        let (query_packet, normalized_question_minimal, upstream_server_idx, net_ext_udp_socket) =
+            match normalized_question.new_pending_query(&upstream_servers,
+                                                        &self.upstream_servers_live_arc
+                                                             .lock()
+                                                             .unwrap(),
+                                                        &self.net_ext_udp_sockets_rc,
+                                                        &self.jumphasher,
+                                                        false,
+                                                        self.config.lbmode) {
                 Err(_) => return Box::new(future::ok(())),
                 Ok(res) => res,
             };
-            let mut upstream_server = &mut upstream_servers[upstream_server_idx];
-            let (done_tx, done_rx) = oneshot::channel();
-            let pending_query = PendingQuery {
-                normalized_question_minimal: normalized_question_minimal,
-                socket_addr: upstream_server.socket_addr,
-                local_port: net_ext_udp_socket.local_addr().unwrap().port(),
-                client_queries: vec![client_query.clone()],
-                ts: Instant::recent(),
-                delay: UPSTREAM_INITIAL_TIMEOUT_MS,
-                upstream_server_idx: upstream_server_idx,
-                done_tx: done_tx,
-            };
-            self.waiting_clients_count
-                .store(pending_query.client_queries.len(), Relaxed);
-            let mut map = self.pending_queries.map_arc.lock().unwrap();
-            debug!("Sending {:#?} to {:?}",
-                   pending_query.normalized_question_minimal,
-                   pending_query.socket_addr);
-            map.insert(key, pending_query);
-            let _ = net_ext_udp_socket.send_to(&query_packet, &upstream_server.socket_addr);
-            upstream_server.pending_queries = upstream_server.pending_queries.wrapping_add(1);
-            let done_rx = done_rx.map_err(|_| ());
-            let timeout = self.timer.timeout(done_rx, time::Duration::from_secs(1));
+        let mut upstream_server = &mut upstream_servers[upstream_server_idx];
+        let (done_tx, done_rx) = oneshot::channel();
+        let pending_query = PendingQuery::new(normalized_question_minimal,
+                                              upstream_server,
+                                              upstream_server_idx,
+                                              net_ext_udp_socket,
+                                              &client_query,
+                                              done_tx);
+        self.waiting_clients_count
+            .store(pending_query.client_queries.len(), Relaxed);
+        let mut map = self.pending_queries.map_arc.lock().unwrap();
+        debug!("Sending {:#?} to {:?}",
+               pending_query.normalized_question_minimal,
+               pending_query.socket_addr);
+        map.insert(key, pending_query);
+        let _ = net_ext_udp_socket.send_to(&query_packet, &upstream_server.socket_addr);
+        upstream_server.pending_queries = upstream_server.pending_queries.wrapping_add(1);
+        let done_rx = done_rx.map_err(|_| ());
+        let timeout = self.timer.timeout(done_rx, time::Duration::from_secs(1));
 
-            let upstream_servers_arc = self.upstream_servers_arc.clone();
-            let upstream_servers_live_arc = self.upstream_servers_live_arc.clone();
-            let net_ext_udp_sockets_rc = self.net_ext_udp_sockets_rc.clone();
-            let lbmode = self.config.lbmode;
-            let jumphasher = self.jumphasher.clone();
-            let normalized_question = normalized_question.clone();
-            let map_arc = self.pending_queries.map_arc.clone();
-            let timer = self.timer.clone();
-            let waiting_clients_count = self.waiting_clients_count.clone();
+        let upstream_servers_arc = self.upstream_servers_arc.clone();
+        let upstream_servers_live_arc = self.upstream_servers_live_arc.clone();
+        let net_ext_udp_sockets_rc = self.net_ext_udp_sockets_rc.clone();
+        let lbmode = self.config.lbmode;
+        let jumphasher = self.jumphasher.clone();
+        let normalized_question = normalized_question.clone();
+        let map_arc = self.pending_queries.map_arc.clone();
+        let timer = self.timer.clone();
+        let waiting_clients_count = self.waiting_clients_count.clone();
 
-            let fut = timeout
-                .map(|_| {})
-                .map_err(|_| io::Error::last_os_error())
-                .or_else(move |_| {
-                    info!("timeout");
-                    let mut map = map_arc.lock().unwrap();
-                    let key = normalized_question.key();
-                    let mut pending_query = match map.get_mut(&key) {
-                        None => {
-                            return Box::new(future::ok(())) as
-                                   Box<Future<Item = (), Error = io::Error>>
+        let fut = timeout
+            .map(|_| {})
+            .map_err(|_| io::Error::last_os_error())
+            .or_else(move |_| {
+                info!("timeout");
+                let mut map = map_arc.lock().unwrap();
+                let key = normalized_question.key();
+                let mut pending_query = match map.get_mut(&key) {
+                    None => {
+                        return Box::new(future::ok(())) as Box<Future<Item = (), Error = io::Error>>
+                    }
+                    Some(pending_query) => pending_query,
+                };
+                let mut upstream_servers = upstream_servers_arc.lock().unwrap();
+                let nq = normalized_question.new_pending_query(&upstream_servers,
+                                                               &upstream_servers_live_arc
+                                                                    .lock()
+                                                                    .unwrap(),
+                                                               &net_ext_udp_sockets_rc,
+                                                               &jumphasher,
+                                                               true,
+                                                               lbmode);
+                let (query_packet,
+                     normalized_question_minimal,
+                     upstream_server_idx,
+                     net_ext_udp_socket) = match nq {
+                    Ok(x) => x,
+                    Err(_) => {
+                        return Box::new(future::ok(())) as Box<Future<Item = (), Error = io::Error>>
+                    }
+                };
+                let upstream_server = &mut upstream_servers[upstream_server_idx];
+                debug!("upstream server: {:?}", upstream_server.socket_addr);
+                let (done_tx, done_rx) = oneshot::channel();
+                pending_query.normalized_question_minimal = normalized_question_minimal;
+                pending_query.socket_addr = upstream_server.socket_addr;
+                pending_query.local_port = net_ext_udp_socket.local_addr().unwrap().port();
+                pending_query.ts = Instant::recent();
+                pending_query.upstream_server_idx = upstream_server_idx;
+                pending_query.done_tx = done_tx;
+                let _ = net_ext_udp_socket.send_to(&query_packet, &upstream_server.socket_addr);
+                upstream_server.pending_queries = upstream_server.pending_queries.wrapping_add(1);
+                let done_rx = done_rx.map_err(|_| ());
+                let timeout = timer.timeout(done_rx, time::Duration::from_secs(1));
+
+                let map_arc = map_arc.clone();
+                let fut = timeout
+                    .map(|_| {})
+                    .map_err(|_| io::Error::last_os_error())
+                    .or_else(move |_| {
+                        info!("retry failed as well");
+                        let mut map = map_arc.lock().unwrap();
+                        if let Some(pending_query) = map.remove(&key) {
+                            let _ = pending_query.done_tx.send(());
+                            waiting_clients_count.store(pending_query.client_queries.len(),
+                                                        Relaxed);
                         }
-                        Some(pending_query) => pending_query,
-                    };
-                    let mut upstream_servers = upstream_servers_arc.lock().unwrap();
-                    let nq = normalized_question.new_pending_query(&upstream_servers,
-                                                                   &upstream_servers_live_arc
-                                                                        .lock()
-                                                                        .unwrap(),
-                                                                   &net_ext_udp_sockets_rc,
-                                                                   &jumphasher,
-                                                                   true,
-                                                                   lbmode);
-                    let (query_packet,
-                         normalized_question_minimal,
-                         upstream_server_idx,
-                         net_ext_udp_socket) = match nq {
-                        Ok(x) => x,
-                        Err(_) => {
-                            return Box::new(future::ok(())) as
-                                   Box<Future<Item = (), Error = io::Error>>
-                        }
-                    };
-                    let upstream_server = &mut upstream_servers[upstream_server_idx];
-                    debug!("upstream server: {:?}", upstream_server.socket_addr);
-                    let (done_tx, done_rx) = oneshot::channel();
-                    pending_query.normalized_question_minimal = normalized_question_minimal;
-                    pending_query.socket_addr = upstream_server.socket_addr;
-                    pending_query.local_port = net_ext_udp_socket.local_addr().unwrap().port();
-                    pending_query.ts = Instant::recent();
-                    pending_query.upstream_server_idx = upstream_server_idx;
-                    pending_query.done_tx = done_tx;
-                    let _ = net_ext_udp_socket.send_to(&query_packet, &upstream_server.socket_addr);
-                    upstream_server.pending_queries =
-                        upstream_server.pending_queries.wrapping_add(1);
-                    let done_rx = done_rx.map_err(|_| ());
-                    let timeout = timer.timeout(done_rx, time::Duration::from_secs(1));
-
-                    let map_arc = map_arc.clone();
-                    let fut = timeout
-                        .map(|_| {})
-                        .map_err(|_| io::Error::last_os_error())
-                        .or_else(move |_| {
-                            info!("retry failed as well");
-                            let mut map = map_arc.lock().unwrap();
-                            if let Some(pending_query) = map.remove(&key) {
-                                let _ = pending_query.done_tx.send(());
-                                waiting_clients_count.store(pending_query.client_queries.len(),
-                                                            Relaxed);
-                            }
-                            Box::new(future::ok(()))
-                        });
-                    info!("retrying...");
-                    Box::new(fut) as Box<Future<Item = (), Error = io::Error>>
-                });
-            return Box::new(fut);
-        }
+                        Box::new(future::ok(()))
+                    });
+                info!("retrying...");
+                Box::new(fut) as Box<Future<Item = (), Error = io::Error>>
+            });
+        return Box::new(fut);
     }
 }
 
