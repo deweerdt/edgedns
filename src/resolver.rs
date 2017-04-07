@@ -203,6 +203,73 @@ impl ExtResponse {
         }
     }
 
+    fn store_to_cache(&mut self,
+                      packet: Vec<u8>,
+                      normalized_question_key: NormalizedQuestionKey,
+                      ttl: u32) {
+        if rcode(&packet) == DNS_RCODE_SERVFAIL {
+            match self.cache.get(&normalized_question_key) {
+                None => {
+                    self.cache
+                        .insert(normalized_question_key, packet, FAILURE_TTL);
+                }
+                Some(cache_entry) => {
+                    self.cache
+                        .insert(normalized_question_key, cache_entry.packet, FAILURE_TTL);
+                    self.varz.client_queries_offline.inc();
+                }
+            }
+        } else {
+            self.cache.insert(normalized_question_key, packet, ttl);
+        }
+        self.update_cache_stats();
+    }
+
+    fn dispatch_pending_query(&mut self,
+                              mut packet: &mut [u8],
+                              normalized_question_key: &NormalizedQuestionKey,
+                              client_addr: SocketAddr)
+                              -> Result<(), &'static str> {
+        let map = self.pending_queries.map_arc.lock().unwrap();
+        let pending_query = match map.get(&normalized_question_key) {
+            None => return Err("No clients waiting for this query"),                
+            Some(pending_query) => pending_query,
+        };
+        if self.verify_ext_response(&pending_query, &packet, client_addr)
+               .is_err() {
+            return Err("Received response is not valid for the query originally sent");
+        }
+        if let Some(ref dnstap_sender) = self.dnstap_sender {
+            dnstap_sender.send_forwarder_response(&packet, client_addr, self.local_port);
+        }
+        let client_queries = &pending_query.client_queries;
+        for client_query in client_queries {
+            set_tid(&mut packet, client_query.normalized_question.tid);
+            overwrite_qname(&mut packet, &client_query.normalized_question.qname);
+            self.varz.upstream_received.inc();
+            match client_query.proto {
+                ClientQueryProtocol::UDP => {
+                    if client_query.ts.elapsed_since_recent() <
+                       Duration::from_millis(UPSTREAM_TIMEOUT_MS) {
+                        if packet.len() > client_query.normalized_question.payload_size as usize {
+                            let packet = &build_tc_packet(&client_query.normalized_question)
+                                              .unwrap();
+                            let _ = self.net_udp_socket
+                                .send_to(&packet, client_query.client_addr.unwrap());
+                        } else {
+                            let _ = self.net_udp_socket
+                                .send_to(&packet, client_query.client_addr.unwrap());
+                        };
+                    }
+                }
+                ClientQueryProtocol::TCP => {
+                    //
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn fut_process_ext_socket(&mut self,
                               packet: Rc<Vec<u8>>,
                               client_addr: SocketAddr)
@@ -233,74 +300,16 @@ impl ExtResponse {
             Ok(ttl) => ttl,
         };
         let normalized_question_key = normalized_question.key();
-        {
-            let map = self.pending_queries.map_arc.lock().unwrap();
-            let pending_query = match map.get(&normalized_question_key) {
-                None => {
-                    debug!("No clients waiting for this query");
-                    return Box::new(future::ok((())));
-                }
-                Some(pending_query) => pending_query,
-            };
-            if self.verify_ext_response(&pending_query, &packet, client_addr)
-                   .is_err() {
-                debug!("Received response is not valid for the query originally sent");
-                return Box::new(future::ok((())));
-            }
-            if let Some(ref dnstap_sender) = self.dnstap_sender {
-                dnstap_sender.send_forwarder_response(&packet, client_addr, self.local_port);
-            }
-            let client_queries = &pending_query.client_queries;
-            for client_query in client_queries {
-                set_tid(&mut packet, client_query.normalized_question.tid);
-                overwrite_qname(&mut packet, &client_query.normalized_question.qname);
-                self.varz.upstream_received.inc();
-                match client_query.proto {
-                    ClientQueryProtocol::UDP => {
-                        if client_query.ts.elapsed_since_recent() <
-                           Duration::from_millis(UPSTREAM_TIMEOUT_MS) {
-                            if packet.len() >
-                               client_query.normalized_question.payload_size as usize {
-                                let packet = &build_tc_packet(&client_query.normalized_question)
-                                                  .unwrap();
-                                let _ = self.net_udp_socket
-                                    .send_to(&packet, client_query.client_addr.unwrap());
-                            } else {
-                                let _ = self.net_udp_socket
-                                    .send_to(&packet, client_query.client_addr.unwrap());
-                            };
-                        }
-                    }
-                    ClientQueryProtocol::TCP => {
-                        //
-                    }
-                }
-            }
-        }
-        {
-            let mut map = self.pending_queries.map_arc.lock().unwrap();
+        self.dispatch_pending_query(&mut packet, &normalized_question_key, client_addr)
+            .unwrap_or_else(|e| debug!("Couldn't dispatch response: {}", e));
+        if let Ok(mut map) = self.pending_queries.map_arc.lock() {
             if let Some(pending_query) = map.remove(&normalized_question_key) {
-                pending_query.done_tx.send(());
+                let _ = pending_query.done_tx.send(());
                 self.waiting_clients_count
                     .store(pending_query.client_queries.len(), Relaxed);
             }
-            if rcode(&packet) == DNS_RCODE_SERVFAIL {
-                match self.cache.get(&normalized_question_key) {
-                    None => {
-                        self.cache
-                            .insert(normalized_question_key, packet, FAILURE_TTL);
-                    }
-                    Some(cache_entry) => {
-                        self.cache
-                            .insert(normalized_question_key, cache_entry.packet, FAILURE_TTL);
-                        self.varz.client_queries_offline.inc();
-                    }
-                }
-            } else {
-                self.cache.insert(normalized_question_key, packet, ttl);
-            }
         }
-        self.update_cache_stats();
+        self.store_to_cache(packet, normalized_question_key, ttl);
         Box::new(future::ok((())))
     }
 
@@ -510,7 +519,6 @@ impl ClientQueriesHandler {
                 });
             return Box::new(fut);
         }
-        Box::new(future::ok(()))
     }
 }
 
