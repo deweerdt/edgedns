@@ -212,17 +212,51 @@ impl ExtResponse {
                 None => {
                     self.cache
                         .insert(normalized_question_key, packet, FAILURE_TTL);
-                }
+                }                
                 Some(cache_entry) => {
+                    self.varz.client_queries_offline.inc();
                     self.cache
                         .insert(normalized_question_key, cache_entry.packet, FAILURE_TTL);
-                    self.varz.client_queries_offline.inc();
                 }
             }
         } else {
             self.cache.insert(normalized_question_key, packet, ttl);
         }
         self.update_cache_stats();
+    }
+
+    fn dispatch_client_query(&self, mut packet: &mut [u8], client_query: &ClientQuery) -> Result<(), &'static str> {
+         set_tid(&mut packet, client_query.normalized_question.tid);
+            overwrite_qname(&mut packet, &client_query.normalized_question.qname);
+            self.varz.upstream_received.inc();
+            match client_query.proto {
+                ClientQueryProtocol::UDP => {
+                    if client_query.ts.elapsed_since_recent() <
+                       Duration::from_millis(UPSTREAM_TIMEOUT_MS) {
+                        if packet.len() > client_query.normalized_question.payload_size as usize {
+                            let packet = &build_tc_packet(&client_query.normalized_question)
+                                              .unwrap();
+                            let _ = self.net_udp_socket
+                                .send_to(&packet, client_query.client_addr.unwrap());
+                        } else {
+                            let _ = self.net_udp_socket
+                                .send_to(&packet, client_query.client_addr.unwrap());
+                        };
+                    }
+                }
+                ClientQueryProtocol::TCP => {}
+            }
+            Ok(())
+    }
+
+    fn dispatch_client_queries(&self,
+                               mut packet: &mut [u8],
+                               client_queries: &Vec<ClientQuery>)
+                               -> Result<(), &'static str> {
+        for client_query in client_queries {
+            let _ = self.dispatch_client_query(packet, client_query);         
+        }
+        Ok(())
     }
 
     fn dispatch_pending_query(&mut self,
@@ -243,31 +277,7 @@ impl ExtResponse {
             dnstap_sender.send_forwarder_response(&packet, client_addr, self.local_port);
         }
         let client_queries = &pending_query.client_queries;
-        for client_query in client_queries {
-            set_tid(&mut packet, client_query.normalized_question.tid);
-            overwrite_qname(&mut packet, &client_query.normalized_question.qname);
-            self.varz.upstream_received.inc();
-            match client_query.proto {
-                ClientQueryProtocol::UDP => {
-                    if client_query.ts.elapsed_since_recent() <
-                       Duration::from_millis(UPSTREAM_TIMEOUT_MS) {
-                        if packet.len() > client_query.normalized_question.payload_size as usize {
-                            let packet = &build_tc_packet(&client_query.normalized_question)
-                                              .unwrap();
-                            let _ = self.net_udp_socket
-                                .send_to(&packet, client_query.client_addr.unwrap());
-                        } else {
-                            let _ = self.net_udp_socket
-                                .send_to(&packet, client_query.client_addr.unwrap());
-                        };
-                    }
-                }
-                ClientQueryProtocol::TCP => {
-                    //
-                }
-            }
-        }
-        Ok(())
+        self.dispatch_client_queries(&mut packet, client_queries)
     }
 
     fn fut_process_ext_socket(&mut self,
