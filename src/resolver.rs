@@ -145,8 +145,66 @@ impl ExtResponse {
         fut_ext_socket
     }
 
+    fn verify_ext_response(&self,
+                           pending_query: &PendingQuery,
+                           packet: &[u8],
+                           client_addr: SocketAddr)
+                           -> Result<(), String> {
+        debug_assert!(packet.len() >= DNS_QUERY_MIN_SIZE);
+        if self.local_port != pending_query.local_port {
+            return Err(format!("Got a reponse on port {} for a query sent on port {}",
+                               self.local_port,
+                               pending_query.local_port));
+        }
+        if client_addr != pending_query.socket_addr {
+            return Err(format!("Sent a query to {:?} but got a response from {:?}",
+                               pending_query.socket_addr,
+                               client_addr));
+
+        }
+        if pending_query.normalized_question_minimal.tid != tid(&packet) {
+            return Err(format!("Sent a query with tid {} but got a response for tid {:?}",
+                               pending_query.normalized_question_minimal.tid,
+                               tid(&packet)));
+        }
+        Ok(())
+    }
+
+    fn upstream_idx_from_client_addr(&self, client_addr: SocketAddr) -> Option<usize> {
+        self.upstream_servers_arc
+            .lock()
+            .unwrap()
+            .iter()
+            .position(|upstream_server| upstream_server.socket_addr == client_addr)
+    }
+
+    fn clamped_ttl(&self, mut packet: &mut [u8]) -> Result<u32, &'static str> {
+        match min_ttl(&packet,
+                      self.config.min_ttl,
+                      self.config.max_ttl,
+                      FAILURE_TTL) {
+            Err(e) => {
+                self.varz.upstream_errors.inc();
+                Err("Unexpected RRs in a response")
+            }
+            Ok(ttl) => {
+                if rcode(&packet) == DNS_RCODE_SERVFAIL {
+                    let _ = set_ttl(&mut packet, FAILURE_TTL);
+                    Ok(FAILURE_TTL)
+                } else if ttl < self.config.min_ttl {
+                    if self.decrement_ttl {
+                        let _ = set_ttl(&mut packet, self.config.min_ttl);
+                    }
+                    Ok(self.config.min_ttl)
+                } else {
+                    Ok(ttl)
+                }
+            }
+        }
+    }
+
     fn fut_process_ext_socket(&mut self,
-                              mut packet: Rc<Vec<u8>>,
+                              packet: Rc<Vec<u8>>,
                               client_addr: SocketAddr)
                               -> Box<Future<Item = (), Error = io::Error>> {
         debug!("received on an external socket {:?}", packet);
@@ -155,19 +213,10 @@ impl ExtResponse {
             self.varz.upstream_errors.inc();
             return Box::new(future::ok((())));
         }
-        let upstream_idx =
-            match self.upstream_servers_arc
-                      .lock()
-                      .unwrap()
-                      .iter()
-                      .position(|upstream_server| upstream_server.socket_addr == client_addr) {
-                Some(upstream_idx) => upstream_idx,
-                None => {
-                    debug!("Got a response from an unexpected upstream server");
-                    return Box::new(future::ok((())));
-                }                
-            };
-        debug!("upstream_idx: {}", upstream_idx);
+        if self.upstream_idx_from_client_addr(client_addr).is_none() {
+            debug!("Got a response from an unexpected upstream server");
+            return Box::new(future::ok((())));
+        }
         let normalized_question = match normalize(&packet, false) {
             Err(e) => {
                 info!("Unexpected question in a response: {}", e);
@@ -176,30 +225,12 @@ impl ExtResponse {
             Ok(normalized_question) => normalized_question,
         };
         let mut packet = (*packet).clone();
-        let ttl = match min_ttl(&packet,
-                                self.config.min_ttl,
-                                self.config.max_ttl,
-                                FAILURE_TTL) {
+        let ttl = match self.clamped_ttl(&mut packet) {
             Err(e) => {
-                info!("Unexpected answers in a response ({}): {}",
-                      normalized_question,
-                      e);
-                self.varz.upstream_errors.inc();
+                info!("Unable to compute a TTL for caching a response: {}", e);
                 return Box::new(future::ok((())));
             }
-            Ok(ttl) => {
-                if rcode(&packet) == DNS_RCODE_SERVFAIL {
-                    let _ = set_ttl(&mut packet, FAILURE_TTL);
-                    FAILURE_TTL
-                } else if ttl < self.config.min_ttl {
-                    if self.decrement_ttl {
-                        let _ = set_ttl(&mut packet, self.config.min_ttl);
-                    }
-                    self.config.min_ttl
-                } else {
-                    ttl
-                }
-            }
+            Ok(ttl) => ttl,
         };
         let normalized_question_key = normalized_question.key();
         {
@@ -211,23 +242,9 @@ impl ExtResponse {
                 }
                 Some(pending_query) => pending_query,
             };
-            if self.local_port != pending_query.local_port {
-                debug!("Got a reponse on port {} for a query sent on port {}",
-                       self.local_port,
-                       pending_query.local_port);
-                return Box::new(future::ok((())));
-            }
-            if client_addr != pending_query.socket_addr {
-                info!("Sent a query to {:?} but got a response from {:?}",
-                      pending_query.socket_addr,
-                      client_addr);
-                return Box::new(future::ok((())));
-
-            }
-            if pending_query.normalized_question_minimal.tid != tid(&packet) {
-                debug!("Sent a query with tid {} but got a response for tid {:?}",
-                       pending_query.normalized_question_minimal.tid,
-                       tid(&packet));
+            if self.verify_ext_response(&pending_query, &packet, client_addr)
+                   .is_err() {
+                debug!("Received response is not valid for the query originally sent");
                 return Box::new(future::ok((())));
             }
             if let Some(ref dnstap_sender) = self.dnstap_sender {
@@ -462,7 +479,7 @@ impl ClientQueriesHandler {
                     let upstream_server = &mut upstream_servers[upstream_server_idx];
                     debug!("upstream server: {:?}", upstream_server.socket_addr);
                     let (done_tx, done_rx) = oneshot::channel();
-                    pending_query.normalized_question_minimal = normalized_question_minimal;                    
+                    pending_query.normalized_question_minimal = normalized_question_minimal;
                     pending_query.socket_addr = upstream_server.socket_addr;
                     pending_query.local_port = net_ext_udp_socket.local_addr().unwrap().port();
                     pending_query.ts = Instant::recent();
