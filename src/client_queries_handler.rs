@@ -141,11 +141,11 @@ impl ClientQueriesHandler {
         upstream_server.pending_queries = upstream_server.pending_queries.wrapping_add(1);
         let done_rx = done_rx.map_err(|_| ());
         let timeout = self.timer.timeout(done_rx, time::Duration::from_secs(1));
-        let fut_retry_query = RetryQueryHandler::new(&self, &normalized_question).fut_retry_query();
+        let retry_query = RetryQueryHandler::new(&self, &normalized_question);
         let fut = timeout
             .map(|_| {})
             .map_err(|_| io::Error::last_os_error())
-            .or_else(|_| fut_retry_query);
+            .or_else(move |_| retry_query.fut_retry_query());
         return Box::new(fut);
     }
 }
@@ -179,7 +179,7 @@ impl RetryQueryHandler {
         }
     }
 
-    fn fut_retry_query(&mut self) -> Box<Future<Item = (), Error = io::Error>> {
+    fn fut_retry_query(&self) -> Box<Future<Item = (), Error = io::Error>> {
         info!("timeout");
         let mut map = self.pending_queries.map_arc.lock().unwrap();
         let key = self.normalized_question.key();
@@ -204,7 +204,8 @@ impl RetryQueryHandler {
             };
         let upstream_server = &mut upstream_servers[upstream_server_idx];
 
-        debug!("new attempt with upstream server: {:?}", upstream_server.socket_addr);
+        debug!("new attempt with upstream server: {:?}",
+               upstream_server.socket_addr);
         let (done_tx, done_rx) = oneshot::channel();
         pending_query.normalized_question_minimal = normalized_question_minimal;
         pending_query.socket_addr = upstream_server.socket_addr;
