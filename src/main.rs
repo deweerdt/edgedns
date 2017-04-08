@@ -36,7 +36,6 @@ extern crate hyper;
 extern crate prometheus;
 
 mod cache;
-mod client;
 mod client_query;
 mod client_queries_handler;
 mod config;
@@ -65,8 +64,6 @@ use std::net;
 use std::sync::Arc;
 use std::sync::mpsc;
 use std::thread;
-use tcp_listener::*;
-use tokio_core::net::UdpSocket;
 use udp_listener::*;
 use varz::*;
 

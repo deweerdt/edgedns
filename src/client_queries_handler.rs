@@ -1,44 +1,25 @@
-use cache::Cache;
-use coarsetime::{Duration, Instant};
+use coarsetime::Instant;
 use config::Config;
-use dns::{NormalizedQuestion, NormalizedQuestionKey, NormalizedQuestionMinimal,
-          build_query_packet, normalize, tid, set_tid, overwrite_qname, build_tc_packet,
-          build_health_check_packet, build_servfail_packet, min_ttl, set_ttl, rcode,
-          DNS_HEADER_SIZE, DNS_RCODE_SERVFAIL};
-use client_query::{ClientQuery, ClientQueryProtocol};
-use ext_response::ExtResponse;
+use dns::{NormalizedQuestion, NormalizedQuestionKey, NormalizedQuestionMinimal, build_query_packet};
+use client_query::ClientQuery;
 use futures::Future;
-use futures::future::{self, Loop, loop_fn, FutureResult};
-use futures::sync::mpsc::{channel, Receiver, Sender};
+use futures::future;
+use futures::sync::mpsc::Receiver;
 use futures::sync::oneshot;
 use futures::Stream;
 use jumphash::JumpHasher;
-use log_dnstap;
-use net_helpers::*;
-use nix::sys::socket::{bind, setsockopt, sockopt, SockAddr, InetAddr};
 use rand::distributions::{IndependentSample, Range};
 use rand;
 use resolver::{PendingQueries, PendingQuery, UpstreamServer, ResolverCore, LoadBalancingMode};
-use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
-use std::os::unix::io::FromRawFd;
-use std::collections::HashMap;
 use std::io;
 use std::net;
 use std::sync::Arc;
-use std::cell::{RefCell, RefMut};
 use std::rc::Rc;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::Mutex;
-use std::thread;
 use std::time;
-use udp_stream::*;
-use tokio_core::net::UdpSocket;
-use tokio_core::reactor::{Core, Handle};
-use tokio_timer::{wheel, Timer, TimeoutError};
-use super::{EdgeDNSContext, DNS_MAX_UDP_SIZE, DNS_QUERY_MIN_SIZE, FAILURE_TTL,
-            UPSTREAM_TIMEOUT_MS, UPSTREAM_INITIAL_TIMEOUT_MS};
-use varz::Varz;
+use tokio_timer::{wheel, Timer};
 
 pub struct ClientQueriesHandler {
     config: Config,

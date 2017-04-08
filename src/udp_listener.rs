@@ -1,12 +1,10 @@
-use bytes::{Bytes, BytesMut};
 use cache::Cache;
 use client_query::*;
 use coarsetime::Instant;
 use dns;
-use futures::{Async, Future, Poll};
-use futures::future::{self, Loop, loop_fn, FutureResult};
-use futures::stream::{Fuse, Peekable, Stream};
-use futures::sync::mpsc::{channel, Sender, Receiver};
+use futures::future::{self, Future};
+use futures::stream::Stream;
+use futures::sync::mpsc::Sender;
 use futures::Sink;
 use std::io;
 use std::net::{self, SocketAddr};
@@ -15,12 +13,11 @@ use std::sync::Arc;
 use std::sync::mpsc;
 use std::thread;
 use super::EdgeDNSContext;
-use tokio_core::net::{UdpSocket, RecvDgram};
 use tokio_core::reactor::{Core, Handle};
 use udp_stream::*;
 use varz::Varz;
 
-use super::{DNS_MAX_UDP_SIZE, DNS_QUERY_MIN_SIZE, DNS_QUERY_MAX_SIZE};
+use super::{DNS_QUERY_MIN_SIZE, DNS_QUERY_MAX_SIZE};
 
 struct UdpListener {
     net_udp_socket: net::UdpSocket,
