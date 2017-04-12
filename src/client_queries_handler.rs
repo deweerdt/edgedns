@@ -78,8 +78,10 @@ impl ClientQueriesHandler {
             Some(key) => key.clone(),
         };
         if let Some(pending_query) = map.remove(&key) {
-            self.waiting_clients_count
-                .fetch_sub(pending_query.client_queries.len(), Relaxed);
+            let clients_count = pending_query.client_queries.len();
+            let prev_count = self.waiting_clients_count
+                .fetch_sub(clients_count, Relaxed);
+            assert!(prev_count >= clients_count);
         }
         true
     }
@@ -93,8 +95,7 @@ impl ClientQueriesHandler {
             None => false,
             Some(pending_query) => {
                 pending_query.client_queries.push(client_query.clone());
-                self.waiting_clients_count
-                    .store(pending_query.client_queries.len(), Relaxed);
+                self.waiting_clients_count.fetch_add(1, Relaxed);
                 true
             }
         }
@@ -138,8 +139,8 @@ impl ClientQueriesHandler {
                                               net_ext_udp_socket,
                                               &client_query,
                                               done_tx);
-        self.waiting_clients_count
-            .store(pending_query.client_queries.len(), Relaxed);
+        debug_assert_eq!(pending_query.client_queries.len(), 1);
+        self.waiting_clients_count.fetch_add(1, Relaxed);
         let mut map = self.pending_queries.map_arc.lock().unwrap();
         debug!("Sending {:#?} to {:?}",
                pending_query.normalized_question_minimal,
@@ -228,7 +229,6 @@ impl RetryQueryHandler {
         let timeout = self.timer.timeout(done_rx, time::Duration::from_secs(2));
         let map_arc = self.pending_queries.map_arc.clone();
         let waiting_clients_count = self.waiting_clients_count.clone();
-
         let fut = timeout
             .map(|_| {})
             .map_err(|_| io::Error::last_os_error())

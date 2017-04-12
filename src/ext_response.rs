@@ -239,8 +239,10 @@ impl ExtResponse {
         if let Ok(mut map) = self.pending_queries.map_arc.lock() {
             if let Some(pending_query) = map.remove(&normalized_question_key) {
                 let _ = pending_query.done_tx.send(());
-                self.waiting_clients_count
-                    .store(pending_query.client_queries.len(), Relaxed);
+                let clients_count = pending_query.client_queries.len();
+                let prev_count = self.waiting_clients_count
+                    .fetch_sub(clients_count, Relaxed);
+                assert!(prev_count >= clients_count);
             }
         }
         self.store_to_cache(packet, normalized_question_key, ttl);
