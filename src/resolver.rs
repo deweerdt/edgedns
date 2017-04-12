@@ -215,7 +215,7 @@ impl ResolverCore {
                     handle.spawn(stream.map_err(|_| {}).map(|_| {}));
                 }
                 let client_queries_handler = ClientQueriesHandler::new(&resolver_core);
-                let stream = client_queries_handler.fut_process_stream(resolver_rx);
+                let stream = client_queries_handler.fut_process_stream(&handle, resolver_rx);
                 event_loop
                     .handle()
                     .spawn(stream.map_err(|_| {}).map(|_| {}));

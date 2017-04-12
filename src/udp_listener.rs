@@ -92,6 +92,7 @@ impl UdpListener {
             normalized_question: normalized_question,
             ts: Instant::recent(),
         };
+        debug!("Sending query to the resolver");
         let fut_resolver_query = self.resolver_tx
             .clone()
             .send(client_query)

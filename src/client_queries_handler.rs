@@ -20,7 +20,9 @@ use std::sync::atomic::Ordering::Relaxed;
 use std::sync::Mutex;
 use std::time;
 use tokio_timer::{wheel, Timer};
+use tokio_core::reactor::Handle;
 
+#[derive(Clone)]
 pub struct ClientQueriesHandler {
     config: Config,
     net_ext_udp_sockets_rc: Rc<Vec<net::UdpSocket>>,
@@ -49,12 +51,18 @@ impl ClientQueriesHandler {
         }
     }
 
-    pub fn fut_process_stream<'a>(mut self,
-                                  resolver_rx: Receiver<ClientQuery>)
-                                  -> impl Future<Item = (), Error = io::Error> + 'a {
+    pub fn fut_process_stream(&self,
+                              handle: &Handle,
+                              resolver_rx: Receiver<ClientQuery>)
+                              -> impl Future<Item = (), Error = io::Error> {
+        let handle = handle.clone();
+        let mut self_inner = self.clone();
         let fut_client_query = resolver_rx.for_each(move |client_query| {
-                                                        self.fut_process_client_query(client_query)
-                                                            .map_err(|_| {})
+                                                        let fut = self_inner
+                                         .fut_process_client_query(client_query)
+                                         .map_err(|_| {});
+                                                        handle.spawn(fut);
+                                                        future::ok(())
                                                     });
         fut_client_query.map_err(|_| io::Error::last_os_error())
     }
@@ -150,6 +158,7 @@ impl ClientQueriesHandler {
     }
 }
 
+#[derive(Clone)]
 pub struct RetryQueryHandler {
     config: Config,
     net_ext_udp_sockets_rc: Rc<Vec<net::UdpSocket>>,
@@ -219,6 +228,7 @@ impl RetryQueryHandler {
         let timeout = self.timer.timeout(done_rx, time::Duration::from_secs(2));
         let map_arc = self.pending_queries.map_arc.clone();
         let waiting_clients_count = self.waiting_clients_count.clone();
+
         let fut = timeout
             .map(|_| {})
             .map_err(|_| io::Error::last_os_error())
@@ -229,7 +239,7 @@ impl RetryQueryHandler {
                     let _ = pending_query.done_tx.send(());
                     waiting_clients_count.store(pending_query.client_queries.len(), Relaxed);
                 }
-                Box::new(future::ok(()))
+                Box::new(future::ok(())) as Box<Future<Item = (), Error = io::Error>>
             });
         info!("retrying...");
         Box::new(fut) as Box<Future<Item = (), Error = io::Error>>
