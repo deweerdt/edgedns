@@ -135,6 +135,7 @@ impl ClientQueriesHandler {
         let cache_entry = self.cache.get2(&normalized_question);
         if let Some(mut cache_entry) = cache_entry {
             self.varz.client_queries_offline.inc();
+            debug!("All upstream servers are down - Responding with stale entry");
             return client_query.response_send(&mut cache_entry.packet, &self.net_udp_socket);
         }
         Box::new(future::ok(()))
@@ -189,10 +190,21 @@ impl ClientQueriesHandler {
         let done_rx = done_rx.map_err(|_| ());
         let timeout = self.timer.timeout(done_rx, time::Duration::from_secs(1));
         let retry_query = RetryQueryHandler::new(&self, &normalized_question);
+        let upstream_servers_arc = self.upstream_servers_arc.clone();
+        let upstream_servers_live_arc = self.upstream_servers_live_arc.clone();
+        let config = self.config.clone();
         let fut = timeout
             .map(|_| {})
             .map_err(|_| io::Error::last_os_error())
-            .or_else(move |_| retry_query.fut_retry_query());
+            .or_else(move |_| {
+                {
+                    let mut upstream_servers = upstream_servers_arc.lock().unwrap();
+                    upstream_servers[upstream_server_idx].record_failure(&config);
+                    *upstream_servers_live_arc.lock().unwrap() =
+                        UpstreamServer::live_servers(&mut upstream_servers);
+                }
+                retry_query.fut_retry_query()
+            });
         return Box::new(fut);
     }
 }
@@ -267,11 +279,20 @@ impl RetryQueryHandler {
         let timeout = self.timer.timeout(done_rx, time::Duration::from_secs(2));
         let map_arc = self.pending_queries.map_arc.clone();
         let waiting_clients_count = self.waiting_clients_count.clone();
+        let upstream_servers_arc = self.upstream_servers_arc.clone();
+        let upstream_servers_live_arc = self.upstream_servers_live_arc.clone();
+        let config = self.config.clone();
         let fut = timeout
             .map(|_| {})
             .map_err(|_| io::Error::last_os_error())
             .or_else(move |_| {
                 info!("retry failed as well");
+                {
+                    let mut upstream_servers = upstream_servers_arc.lock().unwrap();
+                    upstream_servers[upstream_server_idx].record_failure(&config);
+                    *upstream_servers_live_arc.lock().unwrap() =
+                        UpstreamServer::live_servers(&mut upstream_servers);
+                }
                 let mut map = map_arc.lock().unwrap();
                 if let Some(pending_query) = map.remove(&key) {
                     let _ = pending_query.done_tx.send(());
