@@ -22,6 +22,28 @@ pub struct ClientQuery {
 }
 
 impl ClientQuery {
+    pub fn udp(client_addr: SocketAddr, normalized_question: NormalizedQuestion) -> Self {
+        ClientQuery {
+            proto: ClientQueryProtocol::UDP,
+            client_addr: Some(client_addr),
+            tcpclient_tx: None,
+            normalized_question: normalized_question,
+            ts: Instant::recent(),
+        }
+    }
+
+    pub fn tcp(tcpclient_tx: Sender<ResolverResponse>,
+               normalized_question: NormalizedQuestion)
+               -> Self {
+        ClientQuery {
+            proto: ClientQueryProtocol::UDP,
+            client_addr: None,
+            tcpclient_tx: Some(tcpclient_tx),
+            normalized_question: normalized_question,
+            ts: Instant::recent(),
+        }
+    }
+
     pub fn response_send(&self,
                          mut packet: &mut [u8],
                          net_udp_socket: &net::UdpSocket)

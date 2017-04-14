@@ -66,32 +66,15 @@ impl UdpListener {
             }
         };
         let cache_entry = self.cache.get2(&normalized_question);
+        let client_query = ClientQuery::udp(client_addr, normalized_question);
         if let Some(mut cache_entry) = cache_entry {
             if !cache_entry.is_expired() {
                 self.varz.client_queries_cached.inc();
-                if cache_entry.packet.len() > normalized_question.payload_size as usize {
-                    debug!("cached, but has to be truncated");
-                    let packet = dns::build_tc_packet(&normalized_question).unwrap();
-                    let _ = self.net_udp_socket.send_to(&packet, &client_addr);
-                    return Box::new(future::ok(())) as Box<Future<Item = _, Error = _>>;
-                }
-                debug!("cached");
-                dns::set_tid(&mut cache_entry.packet, normalized_question.tid);
-                dns::overwrite_qname(&mut cache_entry.packet, &normalized_question.qname);
-                let _ = self.net_udp_socket
-                    .send_to(&cache_entry.packet, &client_addr);
-                return Box::new(future::ok(())) as Box<Future<Item = _, Error = _>>;
+                return client_query.response_send(&mut cache_entry.packet, &self.net_udp_socket);
             }
             debug!("expired");
             self.varz.client_queries_expired.inc();
         }
-        let client_query = ClientQuery {
-            proto: ClientQueryProtocol::UDP,
-            client_addr: Some(client_addr),
-            tcpclient_tx: None,
-            normalized_question: normalized_question,
-            ts: Instant::recent(),
-        };
         debug!("Sending query to the resolver");
         let fut_resolver_query = self.resolver_tx
             .clone()
