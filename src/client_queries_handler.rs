@@ -1,6 +1,9 @@
 use coarsetime::Instant;
+use cache::Cache;
+use client_query::ClientQueryProtocol;
 use config::Config;
-use dns::{NormalizedQuestion, NormalizedQuestionKey, NormalizedQuestionMinimal, build_query_packet};
+use dns::{self, NormalizedQuestion, NormalizedQuestionKey, NormalizedQuestionMinimal,
+          build_query_packet};
 use client_query::ClientQuery;
 use futures::Future;
 use futures::future;
@@ -21,10 +24,12 @@ use std::sync::Mutex;
 use std::time;
 use tokio_timer::{wheel, Timer};
 use tokio_core::reactor::Handle;
+use varz::Varz;
 
-#[derive(Clone)]
 pub struct ClientQueriesHandler {
+    cache: Cache,
     config: Config,
+    net_udp_socket: net::UdpSocket,
     net_ext_udp_sockets_rc: Rc<Vec<net::UdpSocket>>,
     pending_queries: PendingQueries,
     upstream_servers_arc: Arc<Mutex<Vec<UpstreamServer>>>,
@@ -32,6 +37,25 @@ pub struct ClientQueriesHandler {
     waiting_clients_count: Rc<AtomicUsize>,
     jumphasher: JumpHasher,
     timer: Timer,
+    varz: Arc<Varz>,
+}
+
+impl Clone for ClientQueriesHandler {
+    fn clone(&self) -> Self {
+        ClientQueriesHandler {
+            cache: self.cache.clone(),
+            config: self.config.clone(),
+            net_udp_socket: self.net_udp_socket.try_clone().unwrap(),
+            net_ext_udp_sockets_rc: self.net_ext_udp_sockets_rc.clone(),
+            pending_queries: self.pending_queries.clone(),
+            upstream_servers_arc: self.upstream_servers_arc.clone(),
+            upstream_servers_live_arc: self.upstream_servers_live_arc.clone(),
+            waiting_clients_count: self.waiting_clients_count.clone(),
+            jumphasher: self.jumphasher,
+            timer: self.timer.clone(),
+            varz: self.varz.clone(),
+        }
+    }
 }
 
 impl ClientQueriesHandler {
@@ -40,7 +64,9 @@ impl ClientQueriesHandler {
             .max_capacity(resolver_core.config.max_active_queries)
             .build();
         ClientQueriesHandler {
+            cache: resolver_core.cache.clone(),
             config: resolver_core.config.clone(),
+            net_udp_socket: resolver_core.net_udp_socket.try_clone().unwrap(),
             net_ext_udp_sockets_rc: resolver_core.net_ext_udp_sockets_rc.clone(),
             pending_queries: resolver_core.pending_queries.clone(),
             upstream_servers_arc: resolver_core.upstream_servers_arc.clone(),
@@ -48,6 +74,7 @@ impl ClientQueriesHandler {
             waiting_clients_count: resolver_core.waiting_clients_count.clone(),
             jumphasher: resolver_core.jumphasher,
             timer: timer,
+            varz: resolver_core.varz.clone(),
         }
     }
 
@@ -101,6 +128,18 @@ impl ClientQueriesHandler {
         }
     }
 
+    fn maybe_respond_with_stale_entry(&mut self,
+                                      client_query: ClientQuery)
+                                      -> Box<Future<Item = (), Error = io::Error>> {
+        let normalized_question = &client_query.normalized_question;
+        let cache_entry = self.cache.get2(&normalized_question);
+        if let Some(mut cache_entry) = cache_entry {
+            self.varz.client_queries_offline.inc();
+            return client_query.response_send(&mut cache_entry.packet, &self.net_udp_socket);
+        }
+        Box::new(future::ok(()))
+    }
+
     fn fut_process_client_query(&mut self,
                                 client_query: ClientQuery)
                                 -> Box<Future<Item = (), Error = io::Error>> {
@@ -109,8 +148,7 @@ impl ClientQueriesHandler {
                .lock()
                .unwrap()
                .is_empty() {
-            // Respond with stale records rom cache
-            return Box::new(future::ok(()));
+            return self.maybe_respond_with_stale_entry(client_query);
         }
         let normalized_question = &client_query.normalized_question;
         let key = normalized_question.key();

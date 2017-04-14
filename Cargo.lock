@@ -5,7 +5,7 @@ dependencies = [
  "bpf 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "bytes 0.4.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "clap 2.23.2 (registry+https://github.com/rust-lang/crates.io-index)",
- "clippy 0.0.122 (registry+https://github.com/rust-lang/crates.io-index)",
+ "clippy 0.0.123 (registry+https://github.com/rust-lang/crates.io-index)",
  "clockpro-cache 0.1.5 (registry+https://github.com/rust-lang/crates.io-index)",
  "coarsetime 0.1.4 (registry+https://github.com/rust-lang/crates.io-index)",
  "dnstap 0.1.4 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -122,16 +122,16 @@ dependencies = [
 
 [[package]]
 name = "clippy"
-version = "0.0.122"
+version = "0.0.123"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 dependencies = [
  "cargo_metadata 0.1.2 (registry+https://github.com/rust-lang/crates.io-index)",
- "clippy_lints 0.0.122 (registry+https://github.com/rust-lang/crates.io-index)",
+ "clippy_lints 0.0.123 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
 name = "clippy_lints"
-version = "0.0.122"
+version = "0.0.123"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 dependencies = [
  "matches 0.1.4 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -156,7 +156,7 @@ name = "coarsetime"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 dependencies = [
- "lazy_static 0.2.6 (registry+https://github.com/rust-lang/crates.io-index)",
+ "lazy_static 0.2.8 (registry+https://github.com/rust-lang/crates.io-index)",
  "libc 0.2.21 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
@@ -276,7 +276,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 
 [[package]]
 name = "lazy_static"
-version = "0.2.6"
+version = "0.2.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 
 [[package]]
@@ -396,7 +396,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 dependencies = [
  "cfg-if 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "fnv 1.0.5 (registry+https://github.com/rust-lang/crates.io-index)",
- "lazy_static 0.2.6 (registry+https://github.com/rust-lang/crates.io-index)",
+ "lazy_static 0.2.8 (registry+https://github.com/rust-lang/crates.io-index)",
  "protobuf 1.2.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "quick-error 0.2.2 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
@@ -796,8 +796,8 @@ dependencies = [
 "checksum cargo_metadata 0.1.2 (registry+https://github.com/rust-lang/crates.io-index)" = "34fdab49a2904acb112c83b62f0118de3de3ce28e52a9188dec2858e43878f25"
 "checksum cfg-if 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)" = "de1e760d7b6535af4241fca8bd8adf68e2e7edacc6b29f5d399050c5e48cf88c"
 "checksum clap 2.23.2 (registry+https://github.com/rust-lang/crates.io-index)" = "cbf1114886d7cde2d6448517161d7db8d681a9a1c09f7d210f0b0864e48195f6"
-"checksum clippy 0.0.122 (registry+https://github.com/rust-lang/crates.io-index)" = "d06b770a0e145b422f918ed12e29504490dc65c2d7dc80f79424fd62e2d8a34e"
-"checksum clippy_lints 0.0.122 (registry+https://github.com/rust-lang/crates.io-index)" = "e9abd228ba0d18cf0cad8bb07468ebd24847a9d60f7f6520a0bff45ae5176836"
+"checksum clippy 0.0.123 (registry+https://github.com/rust-lang/crates.io-index)" = "a7198363c39e70567fea459257382656acc6605f60cb3e481e8d58cef561758d"
+"checksum clippy_lints 0.0.123 (registry+https://github.com/rust-lang/crates.io-index)" = "6c5b194842d135d10d08d8fd5d2ab6315648c5cdec66ce8611d5c476bac8c706"
 "checksum clockpro-cache 0.1.5 (registry+https://github.com/rust-lang/crates.io-index)" = "83779adb8130382bbc0f602356a3fa832988cfc59440bb6501f8ee8aece72d7f"
 "checksum coarsetime 0.1.4 (registry+https://github.com/rust-lang/crates.io-index)" = "32309fffcf9eee2ddfaad848f9ed6ecb4fbff9d541794dc7d4aa539ca377ea84"
 "checksum dnstap 0.1.4 (registry+https://github.com/rust-lang/crates.io-index)" = "0df8212703c8d098a9d08774726b5f9f35baf15db2c349a9ec3b562cf5c4d5f9"
@@ -814,7 +814,7 @@ dependencies = [
 "checksum jumphash 0.1.3 (registry+https://github.com/rust-lang/crates.io-index)" = "02f0e5a747c7d2ca0261d475f357aeee545bcff7fa01d331c9a31102ee10042b"
 "checksum kernel32-sys 0.2.2 (registry+https://github.com/rust-lang/crates.io-index)" = "7507624b29483431c0ba2d82aece8ca6cdba9382bff4ddd0f7490560c056098d"
 "checksum language-tags 0.2.2 (registry+https://github.com/rust-lang/crates.io-index)" = "a91d884b6667cd606bb5a69aa0c99ba811a115fc68915e7056ec08a46e93199a"
-"checksum lazy_static 0.2.6 (registry+https://github.com/rust-lang/crates.io-index)" = "2f61b8421c7a4648c391611625d56fdd5c7567da05af1be655fd8cacc643abb3"
+"checksum lazy_static 0.2.8 (registry+https://github.com/rust-lang/crates.io-index)" = "3b37545ab726dd833ec6420aaba8231c5b320814b9029ad585555d2a03e94fbf"
 "checksum lazycell 0.4.0 (registry+https://github.com/rust-lang/crates.io-index)" = "ce12306c4739d86ee97c23139f3a34ddf0387bbf181bc7929d287025a8c3ef6b"
 "checksum libc 0.2.21 (registry+https://github.com/rust-lang/crates.io-index)" = "88ee81885f9f04bff991e306fea7c1c60a5f0f9e409e99f6b40e3311a3363135"
 "checksum log 0.3.7 (registry+https://github.com/rust-lang/crates.io-index)" = "5141eca02775a762cc6cd564d8d2c50f67c0ea3a372cbf1c51592b3e029e10ad"

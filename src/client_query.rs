@@ -1,10 +1,12 @@
 use coarsetime::Instant;
-use dns::NormalizedQuestion;
+use dns::{self, NormalizedQuestion};
+use futures::{future, Future};
 use futures::sync::mpsc::Sender;
 use resolver::*;
-use std::net::SocketAddr;
+use std::io;
+use std::net::{self, SocketAddr};
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 pub enum ClientQueryProtocol {
     UDP,
     TCP,
@@ -17,4 +19,30 @@ pub struct ClientQuery {
     pub tcpclient_tx: Option<Sender<ResolverResponse>>,
     pub normalized_question: NormalizedQuestion,
     pub ts: Instant,
+}
+
+impl ClientQuery {
+    pub fn response_send(&self,
+                         mut packet: &mut [u8],
+                         net_udp_socket: &net::UdpSocket)
+                         -> Box<Future<Item = (), Error = io::Error>> {
+        let normalized_question = &self.normalized_question;
+        let tc_packet;
+        let packet = if self.proto == ClientQueryProtocol::UDP &&
+                        packet.len() > normalized_question.payload_size as usize {
+            tc_packet = dns::build_tc_packet(&normalized_question).unwrap();
+            tc_packet.as_ref()
+        } else {
+            dns::set_tid(&mut packet, normalized_question.tid);
+            dns::overwrite_qname(&mut packet, &normalized_question.qname);
+            packet
+        };
+        match self.proto {
+            ClientQueryProtocol::UDP => {
+                let _ = net_udp_socket.send_to(packet, self.client_addr.unwrap());
+            }
+            ClientQueryProtocol::TCP => {}
+        }
+        Box::new(future::ok(()))
+    }
 }
