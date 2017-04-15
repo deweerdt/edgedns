@@ -80,7 +80,7 @@ impl UpstreamServer {
               self.remote_addr);
     }
 
-    pub fn live_servers(upstream_servers: &Vec<UpstreamServer>) -> Vec<usize> {
+    pub fn live_servers(upstream_servers: &mut Vec<UpstreamServer>) -> Vec<usize> {
         let mut new_live: Vec<usize> = Vec::with_capacity(upstream_servers.len());
         for (idx, upstream_server) in upstream_servers.iter().enumerate() {
             if !upstream_server.offline {
@@ -89,7 +89,8 @@ impl UpstreamServer {
         }
         if new_live.is_empty() {
             warn!("No more live servers, trying to resurrect them all");
-            for (idx, _upstream_server) in upstream_servers.iter().enumerate() {
+            for (idx, upstream_server) in upstream_servers.iter_mut().enumerate() {
+                upstream_server.offline = false;
                 new_live.push(idx);
             }
         }
