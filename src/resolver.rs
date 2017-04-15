@@ -87,6 +87,12 @@ impl UpstreamServer {
                 new_live.push(idx);
             }
         }
+        if new_live.is_empty() {
+            warn!("No more live servers, trying to resurrect them all");
+            for (idx, _upstream_server) in upstream_servers.iter().enumerate() {
+                new_live.push(idx);
+            }
+        }
         info!("Live upstream servers: {:?}", new_live);
         new_live
     }

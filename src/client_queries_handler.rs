@@ -129,7 +129,7 @@ impl ClientQueriesHandler {
     }
 
     fn maybe_respond_with_stale_entry(&mut self,
-                                      client_query: ClientQuery)
+                                      client_query: &ClientQuery)
                                       -> Box<Future<Item = (), Error = io::Error>> {
         let normalized_question = &client_query.normalized_question;
         let cache_entry = self.cache.get2(&normalized_question);
@@ -141,6 +141,17 @@ impl ClientQueriesHandler {
         Box::new(future::ok(()))
     }
 
+    fn maybe_respond_to_all_clients_with_stale_entry
+        (&mut self,
+         pending_query: &PendingQuery)
+         -> Box<Future<Item = (), Error = io::Error>> {
+        let mut fut = Vec::with_capacity(pending_query.client_queries.len());
+        for ref client_query in &pending_query.client_queries {
+            fut.push(self.maybe_respond_with_stale_entry(&client_query));
+        }
+        Box::new(future::join_all(fut).map(|_| {}))
+    }
+
     fn fut_process_client_query(&mut self,
                                 client_query: ClientQuery)
                                 -> Box<Future<Item = (), Error = io::Error>> {
@@ -149,7 +160,7 @@ impl ClientQueriesHandler {
                .lock()
                .unwrap()
                .is_empty() {
-            return self.maybe_respond_with_stale_entry(client_query);
+            return self.maybe_respond_with_stale_entry(&client_query);
         }
         let normalized_question = &client_query.normalized_question;
         let key = normalized_question.key();
