@@ -200,10 +200,11 @@ impl ClientQueriesHandler {
         upstream_server.pending_queries = upstream_server.pending_queries.wrapping_add(1);
         let done_rx = done_rx.map_err(|_| ());
         let timeout = self.timer.timeout(done_rx, time::Duration::from_secs(1));
-        let retry_query = RetryQueryHandler::new(&self, &normalized_question);
+        let retry_query = self.clone();
         let upstream_servers_arc = self.upstream_servers_arc.clone();
         let upstream_servers_live_arc = self.upstream_servers_live_arc.clone();
         let config = self.config.clone();
+        let normalized_question = normalized_question.clone();
         let fut = timeout
             .map(|_| {})
             .map_err(|_| io::Error::last_os_error())
@@ -214,58 +215,29 @@ impl ClientQueriesHandler {
                     *upstream_servers_live_arc.lock().unwrap() =
                         UpstreamServer::live_servers(&mut upstream_servers);
                 }
-                retry_query.fut_retry_query()
+                retry_query.fut_retry_query(normalized_question)
             });
         return Box::new(fut);
     }
-}
 
-#[derive(Clone)]
-pub struct RetryQueryHandler {
-    config: Config,
-    net_ext_udp_sockets_rc: Rc<Vec<net::UdpSocket>>,
-    pending_queries: PendingQueries,
-    upstream_servers_arc: Arc<Mutex<Vec<UpstreamServer>>>,
-    upstream_servers_live_arc: Arc<Mutex<Vec<usize>>>,
-    waiting_clients_count: Rc<AtomicUsize>,
-    jumphasher: JumpHasher,
-    timer: Timer,
-    normalized_question: NormalizedQuestion,
-}
-
-impl RetryQueryHandler {
-    fn new(client_queries_handler: &ClientQueriesHandler,
-           normalized_question: &NormalizedQuestion)
-           -> Self {
-        RetryQueryHandler {
-            config: client_queries_handler.config.clone(),
-            net_ext_udp_sockets_rc: client_queries_handler.net_ext_udp_sockets_rc.clone(),
-            pending_queries: client_queries_handler.pending_queries.clone(),
-            upstream_servers_arc: client_queries_handler.upstream_servers_arc.clone(),
-            upstream_servers_live_arc: client_queries_handler.upstream_servers_live_arc.clone(),
-            waiting_clients_count: client_queries_handler.waiting_clients_count.clone(),
-            jumphasher: client_queries_handler.jumphasher.clone(),
-            timer: client_queries_handler.timer.clone(),
-            normalized_question: normalized_question.clone(),
-        }
-    }
-
-    fn fut_retry_query(&self) -> Box<Future<Item = (), Error = io::Error>> {
+    fn fut_retry_query(&self,
+                       normalized_question: NormalizedQuestion)
+                       -> Box<Future<Item = (), Error = io::Error>> {
         info!("timeout");
         let mut map = self.pending_queries.map_arc.lock().unwrap();
-        let key = self.normalized_question.key();
+        let key = normalized_question.key();
         let mut pending_query = match map.get_mut(&key) {
             None => return Box::new(future::ok(())) as Box<Future<Item = (), Error = io::Error>>,
             Some(pending_query) => pending_query,
         };
         let mut upstream_servers = self.upstream_servers_arc.lock().unwrap();
-        let nq = self.normalized_question
-            .new_pending_query(&upstream_servers,
-                               &self.upstream_servers_live_arc.lock().unwrap(),
-                               &self.net_ext_udp_sockets_rc,
-                               &self.jumphasher,
-                               true,
-                               self.config.lbmode);
+        let nq =
+            normalized_question.new_pending_query(&upstream_servers,
+                                                  &self.upstream_servers_live_arc.lock().unwrap(),
+                                                  &self.net_ext_udp_sockets_rc,
+                                                  &self.jumphasher,
+                                                  true,
+                                                  self.config.lbmode);
         let (query_packet, normalized_question_minimal, upstream_server_idx, net_ext_udp_socket) =
             match nq {
                 Ok(x) => x,
@@ -293,6 +265,7 @@ impl RetryQueryHandler {
         let upstream_servers_arc = self.upstream_servers_arc.clone();
         let upstream_servers_live_arc = self.upstream_servers_live_arc.clone();
         let config = self.config.clone();
+        let mut retry_query = self.clone();
         let fut = timeout
             .map(|_| {})
             .map_err(|_| io::Error::last_os_error())
@@ -306,8 +279,11 @@ impl RetryQueryHandler {
                 }
                 let mut map = map_arc.lock().unwrap();
                 if let Some(pending_query) = map.remove(&key) {
+                    let fut = retry_query
+                        .maybe_respond_to_all_clients_with_stale_entry(&pending_query);
                     let _ = pending_query.done_tx.send(());
-                    waiting_clients_count.store(pending_query.client_queries.len(), Relaxed);
+                    waiting_clients_count.fetch_sub(pending_query.client_queries.len(), Relaxed);
+                    return fut;
                 }
                 Box::new(future::ok(())) as Box<Future<Item = (), Error = io::Error>>
             });
