@@ -1,6 +1,5 @@
 use cache::Cache;
 use client_query::*;
-use coarsetime::Instant;
 use dns;
 use futures::future::{self, Future};
 use futures::stream::Stream;

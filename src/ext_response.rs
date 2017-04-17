@@ -1,14 +1,12 @@
 use cache::Cache;
-use coarsetime::Duration;
 use config::Config;
-use dns::{NormalizedQuestionKey, normalize, tid, set_tid, overwrite_qname, build_tc_packet,
-          min_ttl, set_ttl, rcode, DNS_RCODE_SERVFAIL};
-use client_query::{ClientQuery, ClientQueryProtocol};
+use dns::{NormalizedQuestionKey, normalize, tid, min_ttl, set_ttl, rcode, DNS_RCODE_SERVFAIL};
+use client_query::ClientQuery;
 use futures::Future;
 use futures::future;
 use futures::Stream;
 use log_dnstap;
-use resolver::{PendingQuery, PendingQueries, UpstreamServer, ResolverCore};
+use resolver::{PendingQuery, PendingQueries, ResolverCore};
 use std::io;
 use std::net::{self, SocketAddr};
 use std::sync::Arc;
@@ -18,7 +16,8 @@ use std::sync::atomic::Ordering::Relaxed;
 use std::sync::Mutex;
 use udp_stream::*;
 use tokio_core::reactor::Handle;
-use super::{DNS_QUERY_MIN_SIZE, FAILURE_TTL, UPSTREAM_TIMEOUT_MS};
+use super::{DNS_QUERY_MIN_SIZE, FAILURE_TTL};
+use upstream_server::UpstreamServer;
 use varz::Varz;
 
 pub struct ExtResponse {

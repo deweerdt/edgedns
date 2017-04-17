@@ -1,9 +1,7 @@
 use coarsetime::Instant;
 use cache::Cache;
-use client_query::ClientQueryProtocol;
 use config::Config;
-use dns::{self, NormalizedQuestion, NormalizedQuestionKey, NormalizedQuestionMinimal,
-          build_query_packet};
+use dns::{NormalizedQuestion, NormalizedQuestionKey, NormalizedQuestionMinimal, build_query_packet};
 use client_query::ClientQuery;
 use futures::Future;
 use futures::future;
@@ -13,7 +11,7 @@ use futures::Stream;
 use jumphash::JumpHasher;
 use rand::distributions::{IndependentSample, Range};
 use rand;
-use resolver::{PendingQueries, PendingQuery, UpstreamServer, ResolverCore, LoadBalancingMode};
+use resolver::{PendingQueries, PendingQuery, ResolverCore, LoadBalancingMode};
 use std::io;
 use std::net;
 use std::sync::Arc;
@@ -24,6 +22,7 @@ use std::sync::Mutex;
 use std::time;
 use tokio_timer::{wheel, Timer};
 use tokio_core::reactor::Handle;
+use upstream_server::UpstreamServer;
 use varz::Varz;
 
 pub struct ClientQueriesHandler {

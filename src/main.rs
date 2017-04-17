@@ -48,6 +48,7 @@ mod resolver;
 mod tcp_listener;
 mod udp_listener;
 mod udp_stream;
+mod upstream_server;
 mod varz;
 
 #[cfg(feature = "webservice")]

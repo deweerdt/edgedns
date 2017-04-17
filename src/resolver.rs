@@ -1,103 +1,32 @@
 use cache::Cache;
-use coarsetime::{Duration, Instant};
+use coarsetime::Instant;
 use config::Config;
-use dns::{NormalizedQuestion, NormalizedQuestionKey, NormalizedQuestionMinimal,
-          build_query_packet, normalize, tid, set_tid, overwrite_qname, build_tc_packet,
-          build_health_check_packet, build_servfail_packet, min_ttl, set_ttl, rcode,
-          DNS_HEADER_SIZE, DNS_RCODE_SERVFAIL};
+use dns::{NormalizedQuestionKey, NormalizedQuestionMinimal};
 use client_queries_handler::ClientQueriesHandler;
-use client_query::{ClientQuery, ClientQueryProtocol};
+use client_query::ClientQuery;
 use ext_response::ExtResponse;
 use futures::Future;
-use futures::future::{self, Loop, loop_fn, FutureResult};
 use futures::sync::mpsc::{channel, Receiver, Sender};
 use futures::sync::oneshot;
-use futures::Stream;
 use jumphash::JumpHasher;
 use log_dnstap;
 use net_helpers::*;
 use nix::sys::socket::{bind, setsockopt, sockopt, SockAddr, InetAddr};
-use rand::distributions::{IndependentSample, Range};
-use rand;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::os::unix::io::FromRawFd;
 use std::collections::HashMap;
 use std::io;
 use std::net;
 use std::sync::Arc;
-use std::cell::{RefCell, RefMut};
 use std::rc::Rc;
 use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::Ordering::Relaxed;
 use std::sync::Mutex;
 use std::thread;
-use std::time;
-use udp_stream::*;
-use tokio_core::net::UdpSocket;
-use tokio_core::reactor::{Core, Handle};
-use tokio_timer::{wheel, Timer, TimeoutError};
-use super::{EdgeDNSContext, DNS_MAX_UDP_SIZE, DNS_QUERY_MIN_SIZE, FAILURE_TTL,
-            UPSTREAM_TIMEOUT_MS, UPSTREAM_INITIAL_TIMEOUT_MS};
+use upstream_server::UpstreamServer;
+use tokio_core::reactor::Core;
+use super::{EdgeDNSContext, UPSTREAM_INITIAL_TIMEOUT_MS};
 use varz::Varz;
 
-#[derive(Clone, Debug)]
-pub struct ResolverResponse {
-    pub response: Vec<u8>,
-    pub dnssec: bool,
-}
-
-pub struct UpstreamServer {
-    pub remote_addr: String,
-    pub socket_addr: SocketAddr,
-    pub pending_queries: u64,
-    pub failures: u32,
-    pub offline: bool,
-}
-
-impl UpstreamServer {
-    pub fn new(remote_addr: &str) -> Result<UpstreamServer, &'static str> {
-        let socket_addr = match remote_addr.parse() {
-            Err(_) => return Err("Unable to parse an upstream resolver address"),
-            Ok(socket_addr) => socket_addr,
-        };
-        let upstream_server = UpstreamServer {
-            remote_addr: remote_addr.to_owned(),
-            socket_addr: socket_addr,
-            pending_queries: 0,
-            failures: 0,
-            offline: false,
-        };
-        Ok(upstream_server)
-    }
-
-    pub fn record_failure(&mut self, config: &Config) {
-        self.failures += 1;
-        if self.failures < config.upstream_max_failures {
-            return;
-        }
-        self.offline = true;
-        warn!("Too many failures from resolver {}, putting offline",
-              self.remote_addr);
-    }
-
-    pub fn live_servers(upstream_servers: &mut Vec<UpstreamServer>) -> Vec<usize> {
-        let mut new_live: Vec<usize> = Vec::with_capacity(upstream_servers.len());
-        for (idx, upstream_server) in upstream_servers.iter().enumerate() {
-            if !upstream_server.offline {
-                new_live.push(idx);
-            }
-        }
-        if new_live.is_empty() {
-            warn!("No more live servers, trying to resurrect them all");
-            for (idx, upstream_server) in upstream_servers.iter_mut().enumerate() {
-                upstream_server.offline = false;
-                new_live.push(idx);
-            }
-        }
-        info!("Live upstream servers: {:?}", new_live);
-        new_live
-    }
-}
 
 #[derive(Eq, PartialEq, Copy, Clone, Debug)]
 pub enum LoadBalancingMode {

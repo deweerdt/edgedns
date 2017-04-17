@@ -2,9 +2,14 @@ use coarsetime::Instant;
 use dns::{self, NormalizedQuestion};
 use futures::{future, Future};
 use futures::sync::mpsc::Sender;
-use resolver::*;
 use std::io;
 use std::net::{self, SocketAddr};
+
+#[derive(Clone, Debug)]
+pub struct ResolverResponse {
+    pub response: Vec<u8>,
+    pub dnssec: bool,
+}
 
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum ClientQueryProtocol {
