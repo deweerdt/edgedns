@@ -10,6 +10,7 @@ use std::net::{self, SocketAddr};
 use std::io::Cursor;
 use std::rc::Rc;
 use tokio_core::reactor::Handle;
+use upstream_server::UpstreamServer;
 
 const PROBE_PREFIX: &[u8] = b"edgedns-probe-";
 const PROBE_SUFFIX: &[u8] = b"";
@@ -20,17 +21,18 @@ pub struct UpstreamProbe;
 
 impl UpstreamProbe {
     pub fn new(handle: &Handle,
-               socket_addr: &SocketAddr,
-               net_ext_udp_sockets: &Rc<Vec<net::UdpSocket>>)
+               net_ext_udp_sockets: &Rc<Vec<net::UdpSocket>>,
+               upstream_server: &UpstreamServer)
                -> Self {
-        let probe_qname = Self::compute_probe_qname(PROBE_SUFFIX, &socket_addr).unwrap();
+        let probe_qname = Self::compute_probe_qname(PROBE_SUFFIX, &upstream_server.socket_addr)
+            .unwrap();
         let packet = dns::build_probe_packet(&probe_qname).unwrap();
         let mut rng = rand::thread_rng();
         let random_token_range = Range::new(0usize, net_ext_udp_sockets.len());
         let random_token = random_token_range.ind_sample(&mut rng);
         let net_ext_udp_socket = &net_ext_udp_sockets[random_token];
-        let _ = net_ext_udp_socket.send_to(&packet, &socket_addr);
-        info!("Sent probe to {}", socket_addr.ip());
+        let _ = net_ext_udp_socket.send_to(&packet, &upstream_server.socket_addr);
+        info!("Sent probe to {}", upstream_server.socket_addr.ip());
         UpstreamProbe
     }
 

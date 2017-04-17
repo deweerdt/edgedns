@@ -42,7 +42,7 @@ impl UpstreamServer {
         self.offline = true;
         warn!("Too many failures from resolver {}, putting offline",
               self.remote_addr);
-        let upstream_probe = UpstreamProbe::new(handle, &self.socket_addr, &ext_net_udp_sockets_rc);
+        let upstream_probe = UpstreamProbe::new(handle, &ext_net_udp_sockets_rc, &self);
     }
 
     pub fn live_servers(upstream_servers: &mut Vec<UpstreamServer>) -> Vec<usize> {
