@@ -1,7 +1,7 @@
 use coarsetime::Instant;
 use cache::Cache;
 use config::Config;
-use dns::{NormalizedQuestion, NormalizedQuestionKey, NormalizedQuestionMinimal, build_query_packet};
+use dns::{self, NormalizedQuestion, NormalizedQuestionKey, NormalizedQuestionMinimal};
 use client_query::ClientQuery;
 use futures::Future;
 use futures::future;
@@ -140,6 +140,10 @@ impl ClientQueriesHandler {
             debug!("All upstream servers are down - Responding with stale entry");
             return client_query.response_send(&mut cache_entry.packet, &self.net_udp_socket);
         }
+        if let Ok(mut packet) = dns::build_servfail_packet(&normalized_question) {
+            debug!("Returning SERVFAIL due to upstream timeouts");
+            return client_query.response_send(&mut packet, &self.net_udp_socket);
+        }
         Box::new(future::ok(()))
     }
 
@@ -269,12 +273,14 @@ impl ClientQueriesHandler {
         let upstream_servers_live_arc = self.upstream_servers_live_arc.clone();
         let config = self.config.clone();
         let handle = self.handle.clone();
+        let varz = self.varz.clone();
         let mut retry_query = self.clone();
         let fut = timeout
             .map(|_| {})
             .map_err(|_| io::Error::last_os_error())
             .or_else(move |_| {
                 info!("retry failed as well");
+                varz.upstream_timeout.inc();
                 {
                     let mut upstream_servers = upstream_servers_arc.lock().unwrap();
                     upstream_servers[upstream_server_idx].record_failure(&config, &handle);
@@ -344,7 +350,7 @@ impl NormalizedQuestion {
          lbmode: LoadBalancingMode)
          -> Result<(Vec<u8>, NormalizedQuestionMinimal, usize, &'t net::UdpSocket), &'static str> {
         let (query_packet, normalized_question_minimal) =
-            build_query_packet(self, false).expect("Unable to build a new query packet");
+            dns::build_query_packet(self, false).expect("Unable to build a new query packet");
         let upstream_server_idx = match self.pick_upstream(upstream_servers,
                                                            upstream_servers_live,
                                                            jumphasher,
