@@ -1,6 +1,8 @@
 use config::Config;
-use std::net::SocketAddr;
+use std::net::{self, SocketAddr};
+use std::rc::Rc;
 use tokio_core::reactor::Handle;
+use upstream_probe::UpstreamProbe;
 
 pub struct UpstreamServer {
     pub remote_addr: String,
@@ -26,7 +28,10 @@ impl UpstreamServer {
         Ok(upstream_server)
     }
 
-    pub fn record_failure(&mut self, config: &Config, handle: &Handle) {
+    pub fn record_failure(&mut self,
+                          config: &Config,
+                          handle: &Handle,
+                          ext_net_udp_sockets_rc: &Rc<Vec<net::UdpSocket>>) {
         if self.offline {
             return;
         }
@@ -37,6 +42,7 @@ impl UpstreamServer {
         self.offline = true;
         warn!("Too many failures from resolver {}, putting offline",
               self.remote_addr);
+        let upstream_probe = UpstreamProbe::new(handle, &self.socket_addr, &ext_net_udp_sockets_rc);
     }
 
     pub fn live_servers(upstream_servers: &mut Vec<UpstreamServer>) -> Vec<usize> {

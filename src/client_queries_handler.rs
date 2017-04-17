@@ -212,13 +212,16 @@ impl ClientQueriesHandler {
         let config = self.config.clone();
         let normalized_question = normalized_question.clone();
         let handle = self.handle.clone();
+        let net_ext_udp_sockets_rc = self.net_ext_udp_sockets_rc.clone();
         let fut = timeout
             .map(|_| {})
             .map_err(|_| io::Error::last_os_error())
             .or_else(move |_| {
                 {
                     let mut upstream_servers = upstream_servers_arc.lock().unwrap();
-                    upstream_servers[upstream_server_idx].record_failure(&config, &handle);
+                    upstream_servers[upstream_server_idx].record_failure(&config,
+                                                                         &handle,
+                                                                         &net_ext_udp_sockets_rc);
                     *upstream_servers_live_arc.lock().unwrap() =
                         UpstreamServer::live_servers(&mut upstream_servers);
                 }
@@ -274,6 +277,7 @@ impl ClientQueriesHandler {
         let config = self.config.clone();
         let handle = self.handle.clone();
         let varz = self.varz.clone();
+        let net_ext_udp_sockets_rc = self.net_ext_udp_sockets_rc.clone();
         let mut retry_query = self.clone();
         let fut = timeout
             .map(|_| {})
@@ -283,7 +287,9 @@ impl ClientQueriesHandler {
                 varz.upstream_timeout.inc();
                 {
                     let mut upstream_servers = upstream_servers_arc.lock().unwrap();
-                    upstream_servers[upstream_server_idx].record_failure(&config, &handle);
+                    upstream_servers[upstream_server_idx].record_failure(&config,
+                                                                         &handle,
+                                                                         &net_ext_udp_sockets_rc);
                     *upstream_servers_live_arc.lock().unwrap() =
                         UpstreamServer::live_servers(&mut upstream_servers);
                 }

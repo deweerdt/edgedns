@@ -1,25 +1,50 @@
 use base64;
 use byteorder::{NativeEndian, ReadBytesExt, WriteBytesExt};
 use coarsetime::{Clock, Duration};
+use dns;
+use rand::distributions::{IndependentSample, Range};
+use rand;
 use siphasher::sip::SipHasher13;
-use std::hash::Hasher;
+use std::hash::{Hash, Hasher};
+use std::net::{self, SocketAddr};
 use std::io::Cursor;
+use std::rc::Rc;
+use tokio_core::reactor::Handle;
 
 const PROBE_PREFIX: &[u8] = b"edgedns-probe-";
+const PROBE_SUFFIX: &[u8] = b"";
 const PROBE_KEY_LEN: usize = 12;
 const PROBE_KEY_B64_LEN: usize = 16;
 
 pub struct UpstreamProbe;
 
 impl UpstreamProbe {
-    fn compute_probe_name(probe_suffix: &[u8]) -> Result<Vec<u8>, &'static str> {
+    pub fn new(handle: &Handle,
+               socket_addr: &SocketAddr,
+               net_ext_udp_sockets: &Rc<Vec<net::UdpSocket>>)
+               -> Self {
+        let probe_qname = Self::compute_probe_qname(PROBE_SUFFIX, &socket_addr).unwrap();
+        let packet = dns::build_probe_packet(&probe_qname).unwrap();
+        let mut rng = rand::thread_rng();
+        let random_token_range = Range::new(0usize, net_ext_udp_sockets.len());
+        let random_token = random_token_range.ind_sample(&mut rng);
+        let net_ext_udp_socket = &net_ext_udp_sockets[random_token];
+        let _ = net_ext_udp_socket.send_to(&packet, &socket_addr);
+        info!("Sent probe to {}", socket_addr.ip());
+        UpstreamProbe
+    }
+
+    fn compute_probe_qname(probe_suffix: &[u8],
+                           socket_addr: &SocketAddr)
+                           -> Result<Vec<u8>, &'static str> {
         let mut hasher = SipHasher13::new();
         let mut probe_key = Vec::with_capacity(PROBE_KEY_LEN);
         let now_secs = Clock::recent_since_epoch().as_secs();
         probe_key
             .write_u32::<NativeEndian>(now_secs as u32)
             .unwrap();
-        hasher.write_u32(now_secs as u32);
+        (now_secs as u32).hash(&mut hasher);
+        socket_addr.hash(&mut hasher);
         probe_key
             .write_u64::<NativeEndian>(hasher.finish())
             .unwrap();
@@ -39,7 +64,10 @@ impl UpstreamProbe {
         Ok(probe_name)
     }
 
-    fn verify_probe_name(probe_name: &[u8], probe_suffix: &[u8]) -> Result<(), &'static str> {
+    fn verify_probe_qname(probe_name: &[u8],
+                          probe_suffix: &[u8],
+                          socket_addr: &SocketAddr)
+                          -> Result<(), &'static str> {
         let probe_prefix_len = PROBE_PREFIX.len();
         let probe_suffix_len_with_terminator = if probe_suffix.is_empty() {
             0
@@ -72,7 +100,8 @@ impl UpstreamProbe {
         }
         let expected_h = probe_key_c.read_u64::<NativeEndian>().unwrap();
         let mut hasher = SipHasher13::new();
-        hasher.write_u32(now_secs as u32);
+        (now_secs as u32).hash(&mut hasher);
+        socket_addr.hash(&mut hasher);
         if hasher.finish() != expected_h {
             return Err("Wrong hash for the given probe");
         }

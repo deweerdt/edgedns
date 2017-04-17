@@ -757,23 +757,21 @@ pub fn build_version_packet(normalized_question: &NormalizedQuestion,
     Ok(packet)
 }
 
-pub fn build_health_check_packet() -> Result<(Vec<u8>, NormalizedQuestion), &'static str> {
-    let capacity = DNS_HEADER_SIZE /* + 0 */ + 1;
+pub fn build_probe_packet(qname: &[u8]) -> Result<Vec<u8>, &'static str> {
+    let capacity = DNS_HEADER_SIZE + qname.len() + 1;
     let mut packet = Vec::with_capacity(capacity);
     packet.extend_from_slice(&[0u8; DNS_HEADER_SIZE]);
     set_tid(&mut packet, random());
     set_rd(&mut packet, true);
     set_qdcount(&mut packet, 1);
-    packet.push(0);
-
+    packet.extend_from_slice(qname);
     let qtype = DNS_TYPE_SOA;
     let qclass = DNS_CLASS_IN;
     packet.push((qtype >> 8) as u8);
     packet.push(qtype as u8);
     packet.push((qclass >> 8) as u8);
     packet.push(qclass as u8);
-    let normalized_question = normalize(&packet, true).unwrap();
-    Ok((packet, normalized_question))
+    Ok(packet)
 }
 
 pub fn build_query_packet(normalized_question: &NormalizedQuestion,
