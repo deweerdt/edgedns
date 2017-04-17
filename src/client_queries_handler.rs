@@ -27,7 +27,7 @@ use varz::Varz;
 
 pub struct ClientQueriesHandler {
     cache: Cache,
-    config: Config,
+    config: Rc<Config>,
     handle: Handle,
     net_udp_socket: net::UdpSocket,
     net_ext_udp_sockets_rc: Rc<Vec<net::UdpSocket>>,

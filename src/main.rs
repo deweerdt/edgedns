@@ -65,6 +65,7 @@ use net_helpers::*;
 use privdrop::PrivDrop;
 use resolver::*;
 use std::net;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::mpsc;
 use std::thread;

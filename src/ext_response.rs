@@ -21,7 +21,7 @@ use upstream_server::UpstreamServer;
 use varz::Varz;
 
 pub struct ExtResponse {
-    config: Config,
+    config: Rc<Config>,
     dnstap_sender: Option<log_dnstap::Sender>,
     pending_queries: PendingQueries,
     waiting_clients_count: Rc<AtomicUsize>,

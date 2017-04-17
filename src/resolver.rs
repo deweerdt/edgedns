@@ -80,7 +80,7 @@ impl PendingQueries {
 }
 
 pub struct ResolverCore {
-    pub config: Config,
+    pub config: Rc<Config>,
     pub handle: Handle,
     pub dnstap_sender: Option<log_dnstap::Sender>,
     pub net_udp_socket: net::UdpSocket,
@@ -148,7 +148,7 @@ impl ResolverCore {
                 let mut event_loop = Core::new().expect("No event loop");
                 let handle = event_loop.handle();
                 let resolver_core = ResolverCore {
-                    config: config,
+                    config: Rc::new(config),
                     handle: handle.clone(),
                     dnstap_sender: dnstap_sender,
                     net_udp_socket: net_udp_socket,
