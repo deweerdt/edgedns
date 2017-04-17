@@ -23,7 +23,7 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::Mutex;
 use std::thread;
 use upstream_server::UpstreamServer;
-use tokio_core::reactor::Core;
+use tokio_core::reactor::{Core, Handle};
 use super::{EdgeDNSContext, UPSTREAM_INITIAL_TIMEOUT_MS};
 use varz::Varz;
 
@@ -81,6 +81,7 @@ impl PendingQueries {
 
 pub struct ResolverCore {
     pub config: Config,
+    pub handle: Handle,
     pub dnstap_sender: Option<log_dnstap::Sender>,
     pub net_udp_socket: net::UdpSocket,
     pub net_ext_udp_sockets_rc: Rc<Vec<net::UdpSocket>>,
@@ -145,8 +146,10 @@ impl ResolverCore {
             .name("resolver".to_string())
             .spawn(move || {
                 let mut event_loop = Core::new().expect("No event loop");
+                let handle = event_loop.handle();
                 let resolver_core = ResolverCore {
                     config: config,
+                    handle: handle.clone(),
                     dnstap_sender: dnstap_sender,
                     net_udp_socket: net_udp_socket,
                     net_ext_udp_sockets_rc: Rc::new(net_ext_udp_sockets),
@@ -161,7 +164,6 @@ impl ResolverCore {
                     upstream_max_failures: upstream_max_failures,
                     jumphasher: JumpHasher::default(),
                 };
-                let handle = event_loop.handle();
                 info!("Registering UDP ports...");
                 for net_ext_udp_socket in &*resolver_core.net_ext_udp_sockets_rc {
                     let ext_response_listener =

@@ -28,6 +28,7 @@ use varz::Varz;
 pub struct ClientQueriesHandler {
     cache: Cache,
     config: Config,
+    handle: Handle,
     net_udp_socket: net::UdpSocket,
     net_ext_udp_sockets_rc: Rc<Vec<net::UdpSocket>>,
     pending_queries: PendingQueries,
@@ -44,6 +45,7 @@ impl Clone for ClientQueriesHandler {
         ClientQueriesHandler {
             cache: self.cache.clone(),
             config: self.config.clone(),
+            handle: self.handle.clone(),
             net_udp_socket: self.net_udp_socket.try_clone().unwrap(),
             net_ext_udp_sockets_rc: self.net_ext_udp_sockets_rc.clone(),
             pending_queries: self.pending_queries.clone(),
@@ -65,6 +67,7 @@ impl ClientQueriesHandler {
         ClientQueriesHandler {
             cache: resolver_core.cache.clone(),
             config: resolver_core.config.clone(),
+            handle: resolver_core.handle.clone(),
             net_udp_socket: resolver_core.net_udp_socket.try_clone().unwrap(),
             net_ext_udp_sockets_rc: resolver_core.net_ext_udp_sockets_rc.clone(),
             pending_queries: resolver_core.pending_queries.clone(),
@@ -204,13 +207,14 @@ impl ClientQueriesHandler {
         let upstream_servers_live_arc = self.upstream_servers_live_arc.clone();
         let config = self.config.clone();
         let normalized_question = normalized_question.clone();
+        let handle = self.handle.clone();
         let fut = timeout
             .map(|_| {})
             .map_err(|_| io::Error::last_os_error())
             .or_else(move |_| {
                 {
                     let mut upstream_servers = upstream_servers_arc.lock().unwrap();
-                    upstream_servers[upstream_server_idx].record_failure(&config);
+                    upstream_servers[upstream_server_idx].record_failure(&config, &handle);
                     *upstream_servers_live_arc.lock().unwrap() =
                         UpstreamServer::live_servers(&mut upstream_servers);
                 }
@@ -264,6 +268,7 @@ impl ClientQueriesHandler {
         let upstream_servers_arc = self.upstream_servers_arc.clone();
         let upstream_servers_live_arc = self.upstream_servers_live_arc.clone();
         let config = self.config.clone();
+        let handle = self.handle.clone();
         let mut retry_query = self.clone();
         let fut = timeout
             .map(|_| {})
@@ -272,7 +277,7 @@ impl ClientQueriesHandler {
                 info!("retry failed as well");
                 {
                     let mut upstream_servers = upstream_servers_arc.lock().unwrap();
-                    upstream_servers[upstream_server_idx].record_failure(&config);
+                    upstream_servers[upstream_server_idx].record_failure(&config, &handle);
                     *upstream_servers_live_arc.lock().unwrap() =
                         UpstreamServer::live_servers(&mut upstream_servers);
                 }

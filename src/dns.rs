@@ -824,3 +824,28 @@ pub fn build_query_packet(normalized_question: &NormalizedQuestion,
     };
     Ok((packet, normalized_question_minimal))
 }
+
+pub fn qname_encode(name: &str) -> Result<Vec<u8>, &'static str> {
+    let mut encoded = Vec::with_capacity(name.len() + 1);
+    let mut final_dot = false;
+    for part in name.split('.') {
+        if final_dot {
+            return Err("Invalid name: unexpected dots");
+        }
+        let len = part.len();
+        if len > 0x3f {
+            return Err("Invalid name: label too long (> 63 characters)");
+        } else if len == 0 {
+            if name.len() == 1 {
+                break;
+            }
+            final_dot = true;
+        }
+        encoded.push(len as u8);
+        encoded.extend_from_slice(part.as_bytes());
+    }
+    if !final_dot {
+        encoded.push(0);
+    }
+    Ok(encoded)
+}

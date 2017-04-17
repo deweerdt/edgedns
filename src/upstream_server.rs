@@ -1,5 +1,6 @@
 use config::Config;
 use std::net::SocketAddr;
+use tokio_core::reactor::Handle;
 
 pub struct UpstreamServer {
     pub remote_addr: String,
@@ -25,7 +26,10 @@ impl UpstreamServer {
         Ok(upstream_server)
     }
 
-    pub fn record_failure(&mut self, config: &Config) {
+    pub fn record_failure(&mut self, config: &Config, handle: &Handle) {
+        if self.offline {
+            return;
+        }
         self.failures += 1;
         if self.failures < config.upstream_max_failures {
             return;

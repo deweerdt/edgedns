@@ -5,6 +5,8 @@
 
 #[macro_use]
 extern crate log;
+extern crate base64;
+extern crate byteorder;
 extern crate clockpro_cache;
 #[macro_use]
 extern crate bpf;
@@ -48,6 +50,7 @@ mod resolver;
 mod tcp_listener;
 mod udp_listener;
 mod udp_stream;
+mod upstream_probe;
 mod upstream_server;
 mod varz;
 
