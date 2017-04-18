@@ -158,10 +158,41 @@ impl ClientQueriesHandler {
         Box::new(future::join_all(fut).map(|_| {}))
     }
 
+    fn maybe_send_probe_to_offline_servers(&self,
+                                           query_packet: &[u8],
+                                           upstream_servers: &Vec<UpstreamServer>,
+                                           upstream_servers_live: &Vec<usize>,
+                                           net_ext_udp_socket: &net::UdpSocket)
+                                           -> Result<Option<usize>, io::Error> {
+        if upstream_servers_live.len() == upstream_servers.len() {
+            return Ok(None);
+        }
+        let offline_servers: Vec<_> = upstream_servers
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, upstream_server)| match upstream_server.offline {
+                            false => None,
+                            true => Some(idx),
+                        })
+            .collect();
+        if offline_servers.is_empty() {
+            warn!("Inconsistency between the live servers map and offline status");
+            return Ok(None);
+        }
+        let mut rng = rand::thread_rng();
+        let random_offline_server_range = Range::new(0usize, offline_servers.len());
+        let random_offline_server_idx = offline_servers[random_offline_server_range
+            .ind_sample(&mut rng)];
+        let random_offline_server = &upstream_servers[random_offline_server_idx];
+        net_ext_udp_socket
+            .send_to(&query_packet, &random_offline_server.socket_addr)
+            .map(|_| Some(random_offline_server_idx))
+    }
+
     fn fut_process_client_query(&mut self,
                                 client_query: ClientQuery)
                                 -> Box<Future<Item = (), Error = io::Error>> {
-        info!("Incoming client query {:#?}", client_query);
+        info!("Incoming client query {:?}", client_query);
         if self.upstream_servers_live_arc
                .lock()
                .unwrap()
@@ -187,16 +218,26 @@ impl ClientQueriesHandler {
                 Err(_) => return Box::new(future::ok(())),
                 Ok(res) => res,
             };
+        let probe_idx =
+            self.maybe_send_probe_to_offline_servers(&query_packet,
+                                                     &upstream_servers,
+                                                     &self.upstream_servers_live_arc
+                                                          .lock()
+                                                          .unwrap(),
+                                                     &net_ext_udp_socket);
         let mut upstream_server = &mut upstream_servers[upstream_server_idx];
         let (done_tx, done_rx) = oneshot::channel();
-        let pending_query = PendingQuery::new(normalized_question_minimal,
-                                              upstream_server,
-                                              upstream_server_idx,
-                                              net_ext_udp_socket,
-                                              &client_query,
-                                              done_tx);
+        let mut pending_query = PendingQuery::new(normalized_question_minimal,
+                                                  upstream_server,
+                                                  upstream_server_idx,
+                                                  net_ext_udp_socket,
+                                                  &client_query,
+                                                  done_tx);
         debug_assert_eq!(pending_query.client_queries.len(), 1);
         self.waiting_clients_count.fetch_add(1, Relaxed);
+        if let Ok(Some(probe_idx)) = probe_idx {
+            pending_query.probed_upstream_server_idx = Some(probe_idx);
+        }
         let mut map = self.pending_queries.map_arc.lock().unwrap();
         debug!("Sending {:#?} to {:?}",
                pending_query.normalized_question_minimal,
