@@ -2,6 +2,7 @@
 #![cfg_attr(feature="clippy", plugin(clippy))]
 
 #![feature(conservative_impl_trait)]
+#![allow(dead_code, unused_imports, unused_variables)]
 
 #[macro_use]
 extern crate log;
@@ -65,7 +66,6 @@ use net_helpers::*;
 use privdrop::PrivDrop;
 use resolver::*;
 use std::net;
-use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::mpsc;
 use std::thread;

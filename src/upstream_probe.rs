@@ -1,6 +1,6 @@
 use base64;
 use byteorder::{NativeEndian, ReadBytesExt, WriteBytesExt};
-use coarsetime::{Clock, Duration};
+use coarsetime::Clock;
 use dns;
 use rand::distributions::{IndependentSample, Range};
 use rand;

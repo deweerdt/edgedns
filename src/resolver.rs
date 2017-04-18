@@ -37,12 +37,12 @@ pub enum LoadBalancingMode {
 
 pub struct PendingQuery {
     pub normalized_question_minimal: NormalizedQuestionMinimal,
-    pub socket_addr: SocketAddr,
     pub local_port: u16,
     pub client_queries: Vec<ClientQuery>,
     pub ts: Instant,
     pub delay: u64,
     pub upstream_server_idx: usize,
+    pub probed_upstream_server_idx: Option<usize>,
     pub done_tx: oneshot::Sender<()>,
 }
 
@@ -56,12 +56,12 @@ impl PendingQuery {
                -> Self {
         PendingQuery {
             normalized_question_minimal: normalized_question_minimal,
-            socket_addr: upstream_server.socket_addr,
             local_port: net_ext_udp_socket.local_addr().unwrap().port(),
             client_queries: vec![client_query.clone()],
             ts: Instant::recent(),
             delay: UPSTREAM_INITIAL_TIMEOUT_MS,
             upstream_server_idx: upstream_server_idx,
+            probed_upstream_server_idx: None,
             done_tx: done_tx,
         }
     }

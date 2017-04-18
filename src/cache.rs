@@ -3,7 +3,6 @@ use coarsetime::{Duration, Instant};
 use clockpro_cache::*;
 use dns;
 use dns::{NormalizedQuestion, NormalizedQuestionKey, DNS_CLASS_IN, DNS_RCODE_NXDOMAIN};
-use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 #[derive(Clone, Debug)]

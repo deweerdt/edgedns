@@ -77,16 +77,32 @@ impl ExtResponse {
                                self.local_port,
                                pending_query.local_port));
         }
-        if client_addr != pending_query.socket_addr {
-            return Err(format!("Sent a query to {:?} but got a response from {:?}",
-                               pending_query.socket_addr,
-                               client_addr));
-
-        }
         if pending_query.normalized_question_minimal.tid != tid(&packet) {
             return Err(format!("Sent a query with tid {} but got a response for tid {:?}",
                                pending_query.normalized_question_minimal.tid,
                                tid(&packet)));
+        }
+        if let Ok(mut upstream_servers) = self.upstream_servers_arc.lock() {
+            if client_addr != upstream_servers[pending_query.upstream_server_idx].socket_addr {
+                if let Some(probed_upstream_server_idx) = pending_query.probed_upstream_server_idx {
+                    let mut probed_upstream_server = &mut upstream_servers
+                                                              [probed_upstream_server_idx];
+                    if client_addr == probed_upstream_server.socket_addr {
+                        probed_upstream_server.record_success();
+                    } else {
+                        return Err(format!("Sent a probe query to {:?} but got a response from {:?}",
+                                           probed_upstream_server.socket_addr,
+                                           client_addr));
+                    }
+                } else {
+                    return Err(format!("Sent a query to {:?} but got a response from {:?}",
+                                   upstream_servers[pending_query.upstream_server_idx].socket_addr,
+                                   client_addr));
+                }
+            }
+        } else {
+            return Err(format!("Received a response from {} without any upstream servers configured",
+                               client_addr));
         }
         Ok(())
     }

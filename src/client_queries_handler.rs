@@ -200,7 +200,7 @@ impl ClientQueriesHandler {
         let mut map = self.pending_queries.map_arc.lock().unwrap();
         debug!("Sending {:#?} to {:?}",
                pending_query.normalized_question_minimal,
-               pending_query.socket_addr);
+               upstream_server.socket_addr);
         map.insert(key, pending_query);
         let _ = net_ext_udp_socket.send_to(&query_packet, &upstream_server.socket_addr);
         upstream_server.pending_queries = upstream_server.pending_queries.wrapping_add(1);
@@ -261,7 +261,6 @@ impl ClientQueriesHandler {
                upstream_server.socket_addr);
         let (done_tx, done_rx) = oneshot::channel();
         pending_query.normalized_question_minimal = normalized_question_minimal;
-        pending_query.socket_addr = upstream_server.socket_addr;
         pending_query.local_port = net_ext_udp_socket.local_addr().unwrap().port();
         pending_query.ts = Instant::recent();
         pending_query.upstream_server_idx = upstream_server_idx;
